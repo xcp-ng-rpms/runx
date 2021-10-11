@@ -1,419 +1,46 @@
-From 3bba3993e90d28e826244f877f9d2945c3d867c1 Mon Sep 17 00:00:00 2001
+From e7ffef2fee8981024b7400666ebf7143d3ab33a2 Mon Sep 17 00:00:00 2001
 From: Ronan Abhamon <ronan.abhamon@vates.fr>
 Date: Mon, 16 Aug 2021 12:00:05 +0200
-Subject: [PATCH] XCP-ng integration
+Subject: [PATCH 01/29] XCP-ng integration
 
 Signed-off-by: Ronan Abhamon <ronan.abhamon@vates.fr>
 ---
- .gitignore                                    |   6 +
- DEPENDENCIES                                  |   2 +-
- README.md                                     |  12 +-
- build.sh                                      |  61 ++++--
- config/99-podman-runx.conflist                |   9 +
- config/libpod.conf                            | 157 +++++++++++++++
- config/runx.conf                              |   3 +
- docs/initrd.md                                |   2 +-
- files/container                               |  38 ++++
- files/container-wrapper                       |   5 +
- files/create                                  | 175 ++++++++++------
- files/delete                                  |  20 +-
- files/mount                                   |   7 +-
- files/pause                                   |  12 +-
- files/serial_start                            |   8 +-
- files/start                                   |   9 +-
- files/state                                   |  43 ++--
- initrd/autologin                              |   3 -
- initrd/enter                                  |  82 +++++++-
- initrd/init-initrd                            | 116 +++++++++--
- initrd/inittab                                |   2 -
- initrd/make-initrd                            |  55 ++---
- initrd/passwd                                 |   1 -
- kernel/make-kernel                            |  33 +--
- .../patches/0001-patch-pvcalls_enable.patch   | 190 ------------------
- runX => runx                                  |  40 ++--
- 26 files changed, 675 insertions(+), 416 deletions(-)
- create mode 100644 .gitignore
- create mode 100644 config/99-podman-runx.conflist
- create mode 100644 config/libpod.conf
- create mode 100644 config/runx.conf
+ build.sh                |   2 +-
+ files/container         |  13 +++++
+ files/container-wrapper |   5 ++
+ files/create            | 112 +++++++++++++++++++++++-----------------
+ files/delete            |  13 +++--
+ files/env               |   2 +
+ files/mount             |   7 ++-
+ files/pause             |  12 +++--
+ files/serial_start      |   8 +--
+ files/start             |   8 +--
+ files/state             |  43 ++++++---------
+ runX                    |  27 +++++-----
+ 12 files changed, 146 insertions(+), 106 deletions(-)
  create mode 100755 files/container
  create mode 100755 files/container-wrapper
- delete mode 100644 initrd/autologin
- delete mode 100644 initrd/inittab
- delete mode 100644 initrd/passwd
- delete mode 100644 kernel/patches/0001-patch-pvcalls_enable.patch
- rename runX => runx (67%)
+ create mode 100644 files/env
 
-diff --git a/.gitignore b/.gitignore
-new file mode 100644
-index 0000000..1a96e9d
---- /dev/null
-+++ b/.gitignore
-@@ -0,0 +1,6 @@
-+.config
-+initrd/out
-+kernel/out
-+sendfd/*.o
-+sendfd/sendfd
-+target
-diff --git a/DEPENDENCIES b/DEPENDENCIES
-index fa4d900..3c3c322 100644
---- a/DEPENDENCIES
-+++ b/DEPENDENCIES
-@@ -1,5 +1,5 @@
- Please make sure you have the following installed on your system, they
--are required by runX:
-+are required by runx:
- 
- run time:
- xen tools (xl) >= 4.9
-diff --git a/README.md b/README.md
-index 2459f5e..6843e36 100644
---- a/README.md
-+++ b/README.md
-@@ -60,20 +60,20 @@ Use the following example config stanza in your
- /etc/containerd/config.toml config file to choose RunX as OCI-runtime:
- 
-     [plugins.linux]
--         runtime="/usr/sbin/runX"
-+         runtime="/usr/bin/runx"
- 
- - containerd 1.3.x
- 
- There does not seem to be a way to configure containerd so that it runs
--runX instead of runc. You might have to:
-+runx instead of runc. You might have to:
- 
--    mv /usr/sbin/runX /usr/bin/runc
-+    mv /usr/bin/runx /usr/bin/runc
- 
- - containerd 1.4.x
- 
- Pass "--runc-binary" to ctr run:
- 
--    ctr run --runc-binary=/usr/sbin/runX
-+    ctr run --runc-binary=/usr/bin/runx
- 
- 
- 
-@@ -83,7 +83,7 @@ Networking Configuration
- To get bridge based networking working, you need to include the containerd
- option '--env NETCONF="/path/to/cni/file,name[,IP]"', where:
-     - NETCONF is the environmental varable we use to pass info from containerd
--      to runX
-+      to runx
-     - /path/to/cni/file is the cni v2.0 file used to describe the interface
-     - name is the name of the cni interface
-     - [,IP] is the optional IP if static addresses are used, otherwise DHCP
-@@ -120,7 +120,7 @@ An example cni file is:
- Container Filesystem Binds
- --------------------------
- 
--Currently runX only supports filesystem binds.  The defaults are bind and RW.
-+Currently runx only supports filesystem binds.  The defaults are bind and RW.
- You can also pass any -o arguement mount uses.  Now you use them in containerd
- like:
- 
 diff --git a/build.sh b/build.sh
-index b122689..a1570f3 100755
+index b122689..305ca55 100755
 --- a/build.sh
 +++ b/build.sh
-@@ -15,10 +15,35 @@
- set -e
- set -o pipefail
- 
--# Path to statically built busybox binary i.e.
--# busybox=/usr/bin/busybox-static-aarch64
-+execs="start delete state serial_start create pause mount container container-wrapper"
+@@ -18,7 +18,7 @@ set -o pipefail
+ # Path to statically built busybox binary i.e.
+ # busybox=/usr/bin/busybox-static-aarch64
  
 -execs="start delete state serial_start create pause mount"
-+kernel_path=""
-+busybox_path=""
-+params=""
-+
-+while (( "$#" )); do
-+    case "$1" in
-+        --kernel-path)
-+            kernel_path=$2
-+            shift
-+            shift
-+            ;;
-+        --busybox-path)
-+            busybox_path=$2
-+            shift
-+            shift
-+            ;;
-+        -*|--*=)
-+            echo "Unknown option: $1" >&2
-+            exit 1
-+            ;;
-+        *)
-+            params="$1"
-+            shift
-+            ;;
-+    esac
-+done
-+set -- "${params[@]}"
++execs="start delete state serial_start create pause mount container container-wrapper env"
  
  # Clean the repo, but save the vendor area
  if [ "x${1:-}" != "x" ] && [ "clean" == "$1" ]; then
-@@ -34,6 +59,11 @@ if [ "x${1:-}" != "x" ] && [ "clean" == "$1" ]; then
-     exit 0
- fi
- 
-+if [ -z "$kernel_path" ] || [ -z "$busybox_path" ]; then
-+    echo "Expected kernel and busybox paths." >&2
-+    exit 1
-+fi
-+
- # Support cross-compiling via ARCH variable
- if [[ -z "$ARCH" ]]
- then
-@@ -53,27 +83,30 @@ else
-     exit 1
- fi
- 
--mkdir -p target/usr/share/runX
-+mkdir -p target/usr/share/runx
- for i in $execs; do
--    cp files/$i target/usr/share/runX
-+    cp files/$i target/usr/share/runx
- done
- 
-+mkdir -p target/etc
-+cp config/runx.conf target/etc
-+
- cd sendfd
- make
- cd ..
--cp sendfd/sendfd target/usr/share/runX/
-+cp sendfd/sendfd target/usr/share/runx/
- 
--mkdir -p target/usr/sbin
--cp runX target/usr/sbin
-+mkdir -p target/usr/bin
-+cp runx target/usr/bin
- 
- # Build the kernel and initrd
--if test \! -f target/usr/share/runX/kernel
-+if test \! -f target/usr/share/runx/kernel
- then
--    kernel/make-kernel
--    cp kernel/out/kernel target/usr/share/runX
-+    kernel/make-kernel "$kernel_path"
-+    cp kernel/out/kernel target/usr/share/runx
- fi
--if test \! -f target/usr/share/runX/initrd
-+if test \! -f target/usr/share/runx/initrd
- then
--    initrd/make-initrd
--    cp initrd/out/initrd target/usr/share/runX
-+    initrd/make-initrd "$busybox_path"
-+    cp initrd/out/initrd target/usr/share/runx
- fi
-diff --git a/config/99-podman-runx.conflist b/config/99-podman-runx.conflist
-new file mode 100644
-index 0000000..fcaa102
---- /dev/null
-+++ b/config/99-podman-runx.conflist
-@@ -0,0 +1,9 @@
-+{
-+    "cniVersion": "0.4.0",
-+    "name": "runx",
-+    "plugins": [
-+        {
-+            "type": "loopback"
-+        }
-+    ]
-+}
-diff --git a/config/libpod.conf b/config/libpod.conf
-new file mode 100644
-index 0000000..cef3fb7
---- /dev/null
-+++ b/config/libpod.conf
-@@ -0,0 +1,157 @@
-+# libpod.conf is the default configuration file for all tools using libpod to
-+# manage containers
-+
-+# Default transport method for pulling and pushing for images
-+image_default_transport = "docker://"
-+
-+# Paths to look for the conmon container manager binary.
-+# If the paths are empty or no valid path was found, then the `$PATH`
-+# environment variable will be used as the fallback.
-+conmon_path = [
-+            "/usr/libexec/podman/conmon",
-+            "/usr/local/libexec/podman/conmon",
-+            "/usr/local/lib/podman/conmon",
-+            "/usr/bin/conmon",
-+            "/usr/sbin/conmon",
-+            "/usr/local/bin/conmon",
-+            "/usr/local/sbin/conmon",
-+            "/run/current-system/sw/bin/conmon",
-+]
-+
-+# Environment variables to pass into conmon
-+conmon_env_vars = [
-+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-+]
-+
-+# CGroup Manager - valid values are "systemd" and "cgroupfs"
-+cgroup_manager = "systemd"
-+
-+# Container init binary
-+#init_path = "/usr/libexec/podman/catatonit"
-+
-+# Directory for persistent libpod files (database, etc)
-+# By default, this will be configured relative to where containers/storage
-+# stores containers
-+# Uncomment to change location from this default
-+#static_dir = "/var/lib/containers/storage/libpod"
-+
-+# Directory for temporary files. Must be tmpfs (wiped after reboot)
-+tmp_dir = "/var/run/libpod"
-+
-+# Maximum size of log files (in bytes)
-+# -1 is unlimited
-+max_log_size = -1
-+
-+# Whether to use chroot instead of pivot_root in the runtime
-+no_pivot_root = false
-+
-+# Directory containing CNI plugin configuration files
-+cni_config_dir = "/etc/cni/net.d/"
-+
-+# Directories where the CNI plugin binaries may be located
-+cni_plugin_dir = [
-+               "/usr/libexec/cni",
-+               "/usr/lib/cni",
-+               "/usr/local/lib/cni",
-+               "/opt/cni/bin"
-+]
-+
-+# Default CNI network for libpod.
-+# If multiple CNI network configs are present, libpod will use the network with
-+# the name given here for containers unless explicitly overridden.
-+# The default here is set to the name we set in the
-+# 87-podman-bridge.conflist included in the repository.
-+# Not setting this, or setting it to the empty string, will use normal CNI
-+# precedence rules for selecting between multiple networks.
-+cni_default_network = "runx"
-+
-+# Default libpod namespace
-+# If libpod is joined to a namespace, it will see only containers and pods
-+# that were created in the same namespace, and will create new containers and
-+# pods in that namespace.
-+# The default namespace is "", which corresponds to no namespace. When no
-+# namespace is set, all containers and pods are visible.
-+#namespace = ""
-+
-+# Default infra (pause) image name for pod infra containers
-+infra_image = "k8s.gcr.io/pause:3.1"
-+
-+# Default command to run the infra container
-+infra_command = "/pause"
-+
-+# Determines whether libpod will reserve ports on the host when they are
-+# forwarded to containers. When enabled, when ports are forwarded to containers,
-+# they are held open by conmon as long as the container is running, ensuring that
-+# they cannot be reused by other programs on the host. However, this can cause
-+# significant memory usage if a container has many ports forwarded to it.
-+# Disabling this can save memory.
-+#enable_port_reservation = true
-+
-+# Default libpod support for container labeling
-+# label=true
-+
-+# The locking mechanism to use
-+lock_type = "shm"
-+
-+# Number of locks available for containers and pods.
-+# If this is changed, a lock renumber must be performed (e.g. with the
-+# 'podman system renumber' command).
-+num_locks = 2048
-+
-+# Directory for libpod named volumes.
-+# By default, this will be configured relative to where containers/storage
-+# stores containers.
-+# Uncomment to change location from this default.
-+#volume_path = "/var/lib/containers/storage/volumes"
-+
-+# Selects which logging mechanism to use for Podman events.  Valid values
-+# are `journald` or `file`.
-+# events_logger = "journald"
-+
-+# Specify the keys sequence used to detach a container.
-+# Format is a single character [a-Z] or a comma separated sequence of
-+# `ctrl-<value>`, where `<value>` is one of:
-+# `a-z`, `@`, `^`, `[`, `\`, `]`, `^` or `_`
-+#
-+# detach_keys = "ctrl-p,ctrl-q"
-+
-+# Default OCI runtime
-+runtime = "runx"
-+
-+# List of the OCI runtimes that support --format=json.  When json is supported
-+# libpod will use it for reporting nicer errors.
-+runtime_supports_json = ["runx"]
-+
-+# List of all the OCI runtimes that support --cgroup-manager=disable to disable
-+# creation of CGroups for containers.
-+runtime_supports_nocgroups = ["runx"]
-+
-+# Paths to look for a valid OCI runtime (runc, runv, etc)
-+# If the paths are empty or no valid path was found, then the `$PATH`
-+# environment variable will be used as the fallback.
-+[runtimes]
-+runc = [
-+            "/usr/bin/runc",
-+            "/usr/sbin/runc",
-+            "/usr/local/bin/runc",
-+            "/usr/local/sbin/runc",
-+            "/sbin/runc",
-+            "/bin/runc",
-+            "/usr/lib/cri-o-runc/sbin/runc",
-+            "/run/current-system/sw/bin/runc",
-+]
-+
-+crun = [
-+            "/usr/bin/crun",
-+            "/usr/local/bin/crun",
-+]
-+
-+runx = [
-+            "/usr/bin/runx"
-+]
-+
-+# The [runtimes] table MUST be the last thing in this file.
-+# (Unless another table is added)
-+# TOML does not provide a way to end a table other than a further table being
-+# defined, so every key hereafter will be part of [runtimes] and not the main
-+# config.
-diff --git a/config/runx.conf b/config/runx.conf
-new file mode 100644
-index 0000000..83f7e88
---- /dev/null
-+++ b/config/runx.conf
-@@ -0,0 +1,3 @@
-+SR_UUID=
-+TEMPLATE_UUID=
-+GUEST_TOOLS=
-diff --git a/docs/initrd.md b/docs/initrd.md
-index 92d9c10..82187a8 100644
---- a/docs/initrd.md
-+++ b/docs/initrd.md
-@@ -23,4 +23,4 @@ Otherwise, the three parameters are IP addresses, they can be ipv4 or ipv6. *ip*
- 
- Command line
- ------------
--The container application to run and its command line arguments (command line arguments for the application) are exposed to the RunX initrd via a special text file at the *root (/)* of the container filesystem. The file is named *cmdline*. The RunX initrd reads the content of the file and uses it to find the application to run and to pass command line arguments to it.
-+The container application to run and its command line arguments (command line arguments for the application) are exposed to the RunX initrd via a special text file in */run/runx/* of the container filesystem. The file is named *cmdline*. The RunX initrd reads the content of the file and uses it to find the application to run and to pass command line arguments to it.
 diff --git a/files/container b/files/container
 new file mode 100755
-index 0000000..982162e
+index 0000000..1eb1f8c
 --- /dev/null
 +++ b/files/container
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,13 @@
 +#!/usr/bin/env bash
 +
 +# It's probably more safe to use VM/VDI variables to destroy VM instead of
@@ -423,35 +50,10 @@ index 0000000..982162e
 +vm_uuid="$2"
 +vdi_uuid="$3"
 +wrapper_pid="$4"
-+container_pipe="$5"
 +
-+trap '' INT TERM ABRT
-+
-+domid=''
-+read line <$container_pipe
-+if [[ "$line" == 'start' ]]; then
-+    domid=`list_domains | grep -i "$vm_uuid" | awk '{print $1}'`
-+else
-+    kill -9 $wrapper_pid
-+fi
-+
-+if [[ $domid ]]; then
-+    path=/local/domain/$domid
-+    xenstore-watch $path > $container_pipe &
-+    watch_pid=$!
-+    while read watch ; do
-+        xenstore-read $path &>/dev/null
-+        if [ $? -ne 0 ]; then
-+            kill $wrapper_pid
-+            break
-+        fi
-+    done <$container_pipe
-+    kill -9 $watch_pid
-+fi
-+
++trap '' INT ABRT
 +tail --pid="$wrapper_pid" -f /dev/null
 +"$workpath/delete" "$vm_uuid" "$vdi_uuid"
-+wait
 diff --git a/files/container-wrapper b/files/container-wrapper
 new file mode 100755
 index 0000000..73c2e7d
@@ -464,10 +66,10 @@ index 0000000..73c2e7d
 +trap "kill $PID" INT TERM
 +wait
 diff --git a/files/create b/files/create
-index 0dcae76..e23345e 100755
+index 0dcae76..41aae85 100755
 --- a/files/create
 +++ b/files/create
-@@ -1,31 +1,25 @@
+@@ -1,9 +1,9 @@
  #!/bin/bash
  
 -workpath=/usr/share/runX
@@ -480,23 +82,20 @@ index 0dcae76..e23345e 100755
  bundle=$( cat "$crundir"/bundle )
  pidfile=$( cat "$crundir"/pidfile )
  configfile="$bundle"/config.json
- mountpoint=$( cat "$crundir"/rootfs )
--appname=`cat $configfile | jq '.["Path"]'`
--cmdline=\"`cat $configfile | jq  -c -r '.["process"]["args"] | join("\" \"")'`\"
--env=`cat $configfile | jq  -c -r '.["process"]["env"] | join("\" \"")'`
+@@ -11,21 +11,15 @@ mountpoint=$( cat "$crundir"/rootfs )
+ appname=`cat $configfile | jq '.["Path"]'`
+ cmdline=\"`cat $configfile | jq  -c -r '.["process"]["args"] | join("\" \"")'`\"
+ env=`cat $configfile | jq  -c -r '.["process"]["env"] | join("\" \"")'`
 -xlconf=""
-+appname=$(cat "$configfile" | jq '.["Path"]')
-+cmdline=\"$(cat "$configfile" | jq  -c -r '.["process"]["args"] | join("\" \"")')\"
-+env=$(cat "$configfile" | jq  -c -r '.["process"]["env"] | join("\" \"")')
  kernel="$workpath/kernel"
  ramdisk="$workpath/initrd"
 +vm_uuid_file="$crundir/xcp_vm_uuid"
 +vdi_uuid_file="$crundir/xcp_vdi_uuid"
-+container_pipe="$crundir/container_pipe"
 +
++sr_uuid=""
  for i in $env
  do
--    i=$(echo $i | tr -d \")
+     i=$(echo $i | tr -d \")
 -    if [[ $i = XLCONF=* ]]
 -    then
 -        xlconf=${i#XLCONF=}
@@ -506,34 +105,23 @@ index 0dcae76..e23345e 100755
 -            xlconf=""
 -        fi
 -    fi
-+    i=$(echo "$i" | tr -d \")
      if [[ $i = RUNX_KERNEL=* ]]
      then
          kernel=${i#RUNX_KERNEL=}
-@@ -38,22 +32,60 @@ do
+@@ -38,6 +32,33 @@ do
      fi
  done
  
-+sr_uuid=""
-+template_uuid=""
-+guest_tools=""
-+for i in $( cat /etc/runx.conf )
++for i in $( cat $workpath/env )
 +do
 +    i=$(echo $i | tr -d \")
-+    if [[ $i = SR_UUID=* ]]
++    if [[ $i = RUNX_SR_UUID=* ]]
 +    then
-+        sr_uuid=${i#SR_UUID=}
++        sr_uuid=${i#RUNX_SR_UUID=}
 +    fi
-+    if [[ $i = TEMPLATE_UUID=* ]]
++    if [[ $i = RUNX_TEMPLATE_UUID=* ]]
 +    then
-+        template_uuid=${i#TEMPLATE_UUID=}
-+    fi
-+    if [[ $i = GUEST_TOOLS=* ]]
-+    then
-+        guest_tools=${i#GUEST_TOOLS=}
-+        if [ -f "$guest_tools" ]; then
-+            guest_tools=$(cat "$guest_tools")
-+        fi
++        template_uuid=${i#RUNX_TEMPLATE_UUID=}
 +    fi
 +done
 +
@@ -552,35 +140,9 @@ index 0dcae76..e23345e 100755
 +fi
 +
  # netconf is file,type[,ip]
--netconf=`cat $configfile | jq  -c -r  '.["process"]["env"][] | select(contains("NETCONF"))'`
--netconf=`echo "$netconf" | awk -F "=" '{print $2}'`
-+netconf=$(cat "$configfile" | jq  -c -r  '.["process"]["env"][] | select(contains("NETCONF"))')
-+netconf=$(echo "$netconf" | awk -F "=" '{print $2}')
- if test "$netconf"
- then
--    netfile=`echo "$netconf" | awk -F "," '{print $1}'`
--    netname=`echo "$netconf" | awk -F "," '{print $2}'`
--    netaddr=`echo "$netconf" | awk -F "," '{print $3}'`
--    nettype=`cat $netfile | jq -c -r "select(.[\"name\"] == \"$netname\") | .[\"type\"]"`
-+    netfile=$(echo "$netconf" | awk -F "," '{print $1}')
-+    netname=$(echo "$netconf" | awk -F "," '{print $2}')
-+    netaddr=$(echo "$netconf" | awk -F "," '{print $3}')
-+    nettype=$(cat "$netfile" | jq -c -r "select(.[\"name\"] == \"$netname\") | .[\"type\"]")
- 
-     if test "$nettype" = "bridge"
-     then
-         pvcalls=0
--        bridge=`cat $netfile | jq -c -r "select(.[\"name\"] == \"$netname\") | .[\"bridge\"]"`
--        gw=`cat $netfile | jq -c -r "select(.[\"name\"] == \"$netname\") | .[\"ipam\"][\"gateway\"]"`
--        route=`cat $netfile | jq -c -r "select(.[\"name\"] == \"$netname\") | .[\"ipam\"][\"subnet\"]"`
-+        bridge=$(cat "$netfile" | jq -c -r "select(.[\"name\"] == \"$netname\") | .[\"bridge\"]")
-+        gw=$(cat "$netfile" | jq -c -r "select(.[\"name\"] == \"$netname\") | .[\"ipam\"][\"gateway\"]")
-+        route=$(cat "$netfile" | jq -c -r "select(.[\"name\"] == \"$netname\") | .[\"ipam\"][\"subnet\"]")
-+        dns=$(cat "$netfile" | jq -c -r "select(.[\"name\"] == \"$netname\") | .[\"dns\"][\"nameservers\"]")
-     else
-         #shouldn't get here, but if we do assume pvcalls
-         pvcalls=1
-@@ -62,41 +94,70 @@ else
+ netconf=`cat $configfile | jq  -c -r  '.["process"]["env"][] | select(contains("NETCONF"))'`
+ netconf=`echo "$netconf" | awk -F "=" '{print $2}'`
+@@ -62,41 +83,38 @@ else
      pvcalls=1
  fi
  
@@ -598,14 +160,7 @@ index 0dcae76..e23345e 100755
 -echo "serial='pty'" >> $outconfig
 -echo "boot='c'" >> $outconfig
 -if test $pvcalls -eq 0
-+vm_uuid=$(xe vm-install new-name-label="$vm_name_label" template="$template_uuid" --minimal)
-+vdi_uuid=$(xe vdi-create sr-uuid="$sr_uuid" name-label="$mountpoint" virtual-size=1KiB)
-+vbd_uuid=$(xe vbd-create vm-uuid="$vm_uuid" device=1 vdi-uuid="$vdi_uuid" bootable=false mode=RW type=Disk)
-+
-+pv_args=$(xe vm-param-get param-name=PV-args uuid=$vm_uuid)
-+
-+if test "$netaddr"
- then
+-then
 -    echo "vif=['bridge="$bridge"']" >> $outconfig
 -    if test "$netaddr"
 -    then
@@ -613,59 +168,40 @@ index 0dcae76..e23345e 100755
 -    else
 -        echo extra=\'console=hvc0 root=9p rdinit=/bin/init ip=dhcp\' >> $outconfig
 -    fi
-+    pv_args="$pv_args ip=$netaddr gw=$gw route=$route dns=$dns bridge=$bridge"
- else
+-else
 -    echo "pvcalls=['']" >> $outconfig
 -    echo extra=\'console=hvc0 root=9p rdinit=/bin/init pvcalls=1\' >> $outconfig
-+    pv_args="$pv_args ip=dhcp bridge=$bridge"
- fi
+-fi
 -echo "vfb=['vnc=1']" >> $outconfig
 -echo "p9=[ 'tag=share_dir,security_model=none,path=$mountpoint' ]" >> $outconfig
 -echo "name=\"$containerid\"" >> $outconfig
 -if test -f "$xlconf"
 -then
 -    cat "$xlconf" >> $outconfig
+-fi
++vm_uuid=`xe vm-install new-name-label="$vm_name_label" template="$template_uuid" --minimal`
++vdi_uuid=`xe vdi-create sr-uuid="$sr_uuid" name-label="$mountpoint" virtual-size=1KiB`
++vbd_uuid=`xe vbd-create vm-uuid="$vm_uuid" device=1 vdi-uuid="$vdi_uuid" bootable=false mode=RW type=Disk`
 +
-+xe vm-param-set uuid="$vm_uuid" PV-args="$pv_args root=9p rdinit=/bin/init pvcalls=$pvcalls"
-+xe vm-param-set uuid="$vm_uuid" PV-kernel="/boot/guest/runx/kernel"
-+xe vm-param-set uuid="$vm_uuid" PV-ramdisk="/boot/guest/runx/initrd"
-+
-+runx_dir="$mountpoint/run/runx"
-+
-+# Install tools.
-+if [ "$guest_tools" ]; then
-+    rpm -i --prefix="$mountpoint" "$guest_tools/*.rpm"
- fi
++# TODO: Network.
++# if test $pvcalls -eq 0
++# then
++#     if test "$netaddr"
++#     then
++#         echo extra=\'console=hvc0 root=9p rdinit=/bin/init ip=$netaddr gw=$gw route=$route\' >> $outconfig
++#     else
++#         echo extra=\'console=hvc0 root=9p rdinit=/bin/init ip=dhcp\' >> $outconfig
++#     fi
++# else
++#     echo "pvcalls=['']" >> $outconfig
++#     echo extra=\'console=hvc0 root=9p rdinit=/bin/init pvcalls=1\' >> $outconfig
++# fi
  
--echo $cmdline > $mountpoint/cmdline
+ echo $cmdline > $mountpoint/cmdline
 -xl create -p $outconfig > /dev/null 2>&1
-+# Set command line.
-+mkdir -p "$runx_dir"
-+echo "$cmdline" > "$runx_dir"/cmdline
-+
-+# Share ENV variables.
-+env_variables=$(cat "$configfile" | jq  -c -r '.["process"]["env"] | join("\n")')
-+echo "$env_variables" > "$runx_dir/env"
-+
-+# Specify Working dir.
-+working_dir=$(cat "$configfile" | jq  -c -r '.["process"]["cwd"]')
-+echo -n "$working_dir" > "$runx_dir/working_dir"
-+
-+# Copy or bind config files.
-+config_files=$(cat "$configfile" | jq -c -r '.["mounts"] | map(select(.destination == ("/etc/resolv.conf","/etc/hostname","/etc/hosts","/run/secrets")) | "\(.source);\(.destination)") | .[]')
-+for config in $config_files; do
-+    config_source=${config%;*}
-+    config_dest=$mountpoint/${config#*;}
-+
-+    if [ -d "$config_source" ]; then
-+        mount -o nonempty --bind "$config_source" "$config_dest"
-+    elif [ -f "$config_source" ]; then
-+        # I don't know why but podman creates folders by default...
-+        rm -rf "$config_dest"
-+        cp "$config_source" "$config_dest"
-+    fi
-+done
-+
+ 
+-pid=$( ps | grep -v grep | grep "xl create -p $outconfig" | awk '{print $1}' )
+-echo -n "$pid" > "$pidfile"
 +echo -n "$vm_uuid" > "$vm_uuid_file"
 +echo -n "$vdi_uuid" > "$vdi_uuid_file"
 +
@@ -673,20 +209,17 @@ index 0dcae76..e23345e 100755
 +# This program can be destroyed by docker using "docker kill...", when this last one is killed, a second
 +# program called "container" executes "xe vm-destroy, vdi-destroy...".
 +# Otherwise with only one script we can't clean and shutdown properly the VM if a SIGKILL is received.
-+mkfifo "$container_pipe"
 +"$workpath/container-wrapper" &
 +wrapper_pid="$!"
-+"$workpath/container" "$workpath" "$vm_uuid" "$vdi_uuid" "$wrapper_pid" "$container_pipe" &
- 
--pid=$( ps | grep -v grep | grep "xl create -p $outconfig" | awk '{print $1}' )
--echo -n "$pid" > "$pidfile"
++"$workpath/container" "$workpath" "$vm_uuid" "$vdi_uuid" "$wrapper_pid" &
++
 +# Set the PID to make Docker happy.
 +echo -n "$wrapper_pid" > "$pidfile"
 diff --git a/files/delete b/files/delete
-index 18317b3..2dfa50f 100755
+index 18317b3..49dd5ce 100755
 --- a/files/delete
 +++ b/files/delete
-@@ -1,7 +1,21 @@
+@@ -1,7 +1,14 @@
  #!/bin/bash
  
 -workpath=/usr/share/runX
@@ -697,20 +230,21 @@ index 18317b3..2dfa50f 100755
 +vdi_uuid=$2
  
 -xl destroy $containerid &> /dev/null
-+if [ "$vm_uuid" ]; then
-+    timeout $SHUTDOWN_TIMEOUT xe vm-shutdown uuid="$vm_uuid" &>/dev/null
-+    if [ $? -eq 124 ]; then
-+        xe vm-shutdown --force uuid="$vm_uuid" &>/dev/null
-+    fi
++timeout $SHUTDOWN_TIMEOUT xe vm-shutdown uuid="$vm_uuid"
++if [ $? -eq 124 ]; then
++    xe vm-shutdown --force uuid="$vm_uuid"
 +fi
 +
-+if [ "$vdi_uuid" ]; then
-+    xe vdi-destroy uuid="$vdi_uuid"
-+fi
-+
-+if [ "$vm_uuid" ]; then
-+    xe vm-destroy uuid="$vm_uuid"
-+fi
++xe vdi-destroy uuid="$vdi_uuid"
++xe vm-destroy uuid="$vm_uuid"
+diff --git a/files/env b/files/env
+new file mode 100644
+index 0000000..b893711
+--- /dev/null
++++ b/files/env
+@@ -0,0 +1,2 @@
++RUNX_SR_UUID=f09ca0f6-c32e-ffdd-858a-17a8fcb303b9
++RUNX_TEMPLATE_UUID=1cab9056-f9af-1a13-76c6-7d4cb6f4dee4
 diff --git a/files/mount b/files/mount
 index 0563df2..3a774f7 100755
 --- a/files/mount
@@ -779,10 +313,10 @@ index d5913d5..554796b 100755
 +  PTY,link=${dev_containerd},rawer \
 +  ${dev_xen},rawer
 diff --git a/files/start b/files/start
-index 39d15e0..ffe5427 100755
+index 39d15e0..500f6ee 100755
 --- a/files/start
 +++ b/files/start
-@@ -1,7 +1,10 @@
+@@ -1,7 +1,9 @@
  #!/bin/bash
  
 -workpath=/usr/share/runX
@@ -795,9 +329,8 @@ index 39d15e0..ffe5427 100755
  
 -xl unpause "$1"
 +xe vm-start uuid="$vm_uuid"
-+echo -n "start" > "$crundir/container_pipe"
 diff --git a/files/state b/files/state
-index b666239..e624954 100755
+index b666239..3b2a087 100755
 --- a/files/state
 +++ b/files/state
 @@ -1,43 +1,30 @@
@@ -850,7 +383,7 @@ index b666239..e624954 100755
 +  fi
  fi
  
-+pid="0"
++pid=""
  if test -f "$pidfile"
  then
      pid=$( cat "$pidfile" )
@@ -859,108 +392,97 @@ index b666239..e624954 100755
  fi
  
  cat << EOF
-diff --git a/initrd/autologin b/initrd/autologin
-deleted file mode 100644
-index c9b1092..0000000
---- a/initrd/autologin
-+++ /dev/null
-@@ -1,3 +0,0 @@
--#!/bin/sh
--
--exec /bin/login -f root
-diff --git a/initrd/enter b/initrd/enter
-index f0086f0..025e5fe 100644
---- a/initrd/enter
-+++ b/initrd/enter
-@@ -1,5 +1,79 @@
--#!/bin/sh
-+#!/run/initramfs/bin/ash
+diff --git a/runX b/runX
+index 9076934..b57872e 100755
+--- a/runX
++++ b/runX
+@@ -1,6 +1,6 @@
+ #!/bin/bash
  
--cmd=`cat /mnt/cmdline`
--echo Executing $cmd
--eval chroot /mnt $cmd
-+BUSYBOX_DIR=/run/initramfs/bin
-+CONFIG_DIR=/run/runx
-+XE_DAEMON=/usr/bin/xe-daemon
-+
-+poweroff_handler() {
-+    $BUSYBOX_DIR/kill -s TERM -1
-+    $BUSYBOX_DIR/sync
-+    $BUSYBOX_DIR/sleep 1
-+
-+    $BUSYBOX_DIR/kill -s KILL -1
-+    $BUSYBOX_DIR/sync
-+    $BUSYBOX_DIR/sleep 1
-+
-+    $BUSYBOX_DIR/umount -a -r
-+    $BUSYBOX_DIR/swapoff -a
-+    $BUSYBOX_DIR/poweroff -f
-+}
-+
-+trap '' INT
-+trap poweroff_handler 0 USR1 USR2 TERM
-+
-+export $($BUSYBOX_DIR/cat $CONFIG_DIR/env | $BUSYBOX_DIR/xargs)
-+
-+if [ "$HOSTNAME" ]; then
-+    $BUSYBOX_DIR/hostname "$HOSTNAME"
-+fi
-+
-+# Run guest tools.
-+distro="runx"
-+major="1"
-+minor="2"
-+uname=$($BUSYBOX_DIR/uname -r)
-+name="runx"
-+
-+$BUSYBOX_DIR/cat >/var/cache/xe-linux-distribution <<EOL
-+os_distro="${distro}"
-+os_majorver="${major}"
-+os_minorver="${minor}"
-+os_uname="${uname}"
-+os_name="${name}"
-+EOL
-+
-+xe_daemon_pid=""
-+if [ -f "$XE_DAEMON" ]; then
-+    $XE_DAEMON &
-+    xe_daemon_pid=$!
-+fi
-+
-+# Try to chdir with root user.
-+working_dir=`$BUSYBOX_DIR/cat $CONFIG_DIR/working_dir`
-+if [ "$working_dir" ]; then
-+    cd "$working_dir" &>/dev/null
-+    if [ $? -eq 0 ]; then
-+        # Directory changed with success.
-+        working_dir=""
-+    fi
-+fi
-+
-+# TODO: Change user/group here.
-+
-+# Retry chdir with new user if necessary.
-+if [ "$working_dir" ]; then
-+    cd "$working_dir" &>/dev/null
-+    if [ $? -ne 0 ]; then
-+        echo "Failed to change working dir!"
-+    fi
-+fi
-+
-+cmd=`$BUSYBOX_DIR/cat $CONFIG_DIR/cmdline`
-+echo "Executing $cmd..."
-+eval $cmd &
-+
-+if [ "$xe_daemon_pid" ]; then
-+    $BUSYBOX_DIR/kill $xe_daemon_pid
-+fi
-+
-+wait
+-workpath=/usr/share/runX
++workpath=/root/Projects/runx/files/
+ rundir=/run/runX
+ 
+ guestconsole=""
+@@ -103,29 +103,29 @@ fi
+ 
+ if test $cmd = "state"
+ then
+-    $workpath/state $containerid "$crundir"
++    "$workpath/state" "$workpath" $containerid "$crundir"
+ elif test $cmd = "start"
+ then
+-    $workpath/start $containerid
++    "$workpath/start" "$workpath" $containerid "$crundir"
+ elif test $cmd = "pause"
+ then
+-    $workpath/pause $containerid pause
++    "$workpath/pause" "$workpath" $containerid "$crundir" pause
+ elif test $cmd = "resume"
+ then
+-    $workpath/pause $containerid resume
++    "$workpath/pause" "$workpath" $containerid "$crundir" resume
+ elif test $cmd = "kill"
+ then
+-    $workpath/delete $containerid
+-    $workpath/mount $containerid "$crundir" unmount
++    "$workpath/delete" `cat "$crundir"/xcp_vm_uuid` `cat "$crundir"/xcp_vdi_uuid`
++    "$workpath/mount" "$crundir" unmount
+ elif test $cmd = "create"
+ then
+-    $workpath/mount $containerid "$crundir" mount
+-    $workpath/create $containerid "$crundir"
++    "$workpath/mount" "$crundir" mount
++    "$workpath/create" "$workpath" $containerid "$crundir"
+ 
+     if test "$guestconsole"
+     then
+-        daemonize $workpath/serial_start \
+-          "$containerid" \
++        daemonize "$workpath/serial_start" \
++          `cat "$crundir"/xcp_conf` \
+           "$crundir"/console_pty
+         for n in 10 9 8 7 6 5 4 3 2 1; do
+             if [ ! -L "$crundir"/console_pty ]; then
+@@ -134,14 +134,17 @@ then
+               break
+             fi;
+         done
+-        daemonize $workpath/sendfd \
++        daemonize "$workpath/sendfd" \
+           "$guestconsole" \
+           "$crundir"/console_pty
+     else
+          echo "connect to container console with 'xl console $containerid'"
+     fi
++    exit 0 # Previous test can set $? to 1...
+ elif test $cmd = "delete"
+ then
++    "$workpath/delete" "$workpath" $containerid "$crundir"
++    "$workpath/mount" "$workpath" $containerid "$crundir" unmount
+     rm -rf "$crundir"
+ else
+     :
+-- 
+2.33.0
+
+
+From 080371bf36d83defcd3f5c68e1fa8f27be090789 Mon Sep 17 00:00:00 2001
+From: Ronan Abhamon <ronan.abhamon@vates.fr>
+Date: Mon, 20 Sep 2021 15:39:23 +0200
+Subject: [PATCH 02/29] use a tmpfs to grant access to our boot context in
+ /run/initramfs + exec sh
+
+Signed-off-by: Ronan Abhamon <ronan.abhamon@vates.fr>
+---
+ initrd/init-initrd | 44 ++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 44 insertions(+)
+
 diff --git a/initrd/init-initrd b/initrd/init-initrd
-index 579559b..8297681 100755
+index 579559b..3327c76 100755
 --- a/initrd/init-initrd
 +++ b/initrd/init-initrd
-@@ -1,5 +1,70 @@
+@@ -1,5 +1,47 @@
  #!/bin/sh
  
 +# Useful to enable the possibility to use the pivot_root command.
@@ -978,14 +500,13 @@ index 579559b..8297681 100755
 +                cp -a $directory $DEST 2>/dev/null
 +            fi
 +        done
-+        cp /init $DEST
 +
 +        touch $DEST/etc/initramfs_moved
 +        exec switch_root $DEST $0
 +    fi
 +}
 +
-+switch_9p_root()
++switch_root()
 +{
 +    new_root=$1
 +    echo "Switching root $1..."
@@ -993,35 +514,13 @@ index 579559b..8297681 100755
 +    umount /proc
 +    umount /sys
 +
++    mkdir -p $new_root/run
++    mount -t tmpfs tmpfs $new_root/run
 +    mkdir -p $new_root/run/initramfs
 +
-+    BUSYBOX_DIR=/run/initramfs/bin
-+
-+    # Replace poweroff binary because it is called by a PV hypercall when xe vm-shutdown command is executed.
-+    # In many cases the default poweroff binary of the 9pfs depends on systemd or another program, but we don't use it.
-+    mkdir -p $new_root/sbin
-+    rm $new_root/sbin/poweroff 2>/dev/null
-+    ln -s $BUSYBOX_DIR/busybox $new_root/sbin/poweroff
-+
-+    # Do the same thing for halt and reboot
-+    rm $new_root/sbin/halt 2>/dev/null
-+    rm $new_root/sbin/reboot 2>/dev/null
-+    ln -s $BUSYBOX_DIR/busybox $new_root/sbin/halt
-+    ln -s $BUSYBOX_DIR/busybox $new_root/sbin/reboot
-+
-+    # Relink some commands used in enter script.
-+    # Relinking all commands has a cost of many seconds, so we do that only on required commands.
-+    for binary in ash cat chroot getty hostname kill poweroff sleep swapoff sync umount uname xargs ; do
-+        ln -s -f $BUSYBOX_DIR/busybox /bin/$binary
-+    done
-+
-+    cd $new_root
-+    pivot_root . $new_root/run/initramfs
-+    cd /
-+
-+    exec $BUSYBOX_DIR/chroot . $BUSYBOX_DIR/getty -n -l $BUSYBOX_DIR/enter 115200 hvc0
-+
-+    $BUSYBOX_DIR/ash # Fallback if we can't execute the command.
++    pivot_root $new_root $new_root/run/initramfs
++    exec chroot / /bin/sh
++    /bin/sh # Fallback if we can't execute the command.
 +}
 +
 +# ==============================================================================
@@ -1031,11 +530,105 @@ index 579559b..8297681 100755
  mount -t proc proc /proc
  mount -t sysfs sysfs /sys
  mount -t devtmpfs devtmpfs /dev
-@@ -29,27 +94,36 @@ mount -o bind /proc /mnt/proc
- ip=`cat /proc/cmdline | grep -o '\bip=[^ ]*' | cut -d = -f 2`
- gw=`cat /proc/cmdline | grep -o '\bgw=[^ ]*' | cut -d = -f 2`
+@@ -53,3 +95,5 @@ then
+ 		echo "nameserver 2001:4860:4860::8888" > /mnt/etc/resolv.conf
+ 	fi
+ fi
++
++switch_root /mnt `cat /mnt/cmdline`
+-- 
+2.33.0
+
+
+From 93ec07ca20590b6f522d2144a6ab0adc781f1127 Mon Sep 17 00:00:00 2001
+From: BenjiReis <benjamin.reis@vates.fr>
+Date: Tue, 21 Sep 2021 15:11:18 +0200
+Subject: [PATCH 03/29] attempt to get dhcp ip when no ip given to cmdline
+
+Signed-off-by: BenjiReis <benjamin.reis@vates.fr>
+---
+ initrd/configure-network | 64 ++++++++++++++++++++++++++++++++++++++++
+ initrd/init-initrd       | 48 +++++++++++++++++-------------
+ initrd/make-initrd       |  2 ++
+ 3 files changed, 93 insertions(+), 21 deletions(-)
+ create mode 100644 initrd/configure-network
+
+diff --git a/initrd/configure-network b/initrd/configure-network
+new file mode 100644
+index 0000000..fbf1ad2
+--- /dev/null
++++ b/initrd/configure-network
+@@ -0,0 +1,64 @@
++#!/bin/sh
++# udhcpc script edited by Tim Riker <Tim@Rikers.org>
++# Modified for XCP-ng integration.
++
++RESOLV_CONF="/mnt/etc/resolv.conf"
++
++[ -n "$1" ] || { echo "Error: should be called from udhcpc"; exit 1; }
++
++NETMASK=""
++[ -n "$subnet" ] && NETMASK="/$subnet"
++BROADCAST="broadcast +"
++[ -n "$broadcast" ] && BROADCAST="broadcast $broadcast"
++
++case "$1" in
++	deconfig)
++		echo "Clearing IP addresses on $interface, upping it"
++		ip -4 addr flush dev $interface
++		ip link set dev $interface up
++		;;
++
++	renew|bound)
++		echo "Setting IP address $ip on $interface"
++		ip addr add $ip$NETMASK $BROADCAST dev $interface
++
++		if [ -n "$router" ] ; then
++			echo "Deleting routers"
++			while route del default gw 0.0.0.0 dev $interface ; do
++				:
++			done
++
++			metric=0
++			for i in $router ; do
++				echo "Adding router $i"
++				if [ "$subnet" = "255.255.255.255" ]; then
++	# special case for /32 subnets:
++	# /32 instructs kernel to always use routing for all outgoing packets
++	# (they can never be sent to local subnet - there is no local subnet for /32).
++	# Used in datacenters, avoids the need for private ip-addresses between two hops.
++					ip route add $i dev $interface
++				fi
++				route add default gw $i dev $interface metric $((metric++))
++			done
++		fi
++
++		# If the file is a symlink somewhere (like /etc/resolv.conf
++		# pointing to /run/resolv.conf), make sure things work.
++		if test -L "$RESOLV_CONF"; then
++			# If it's a dangling symlink, try to create the target.
++			test -e "$RESOLV_CONF" || touch "$RESOLV_CONF"
++		fi
++		realconf=$(readlink -f "$RESOLV_CONF" 2>/dev/null || echo "$RESOLV_CONF")
++		echo "Recreating $realconf"
++		tmpfile="$realconf-$$"
++		> "$tmpfile"
++		[ -n "$domain" ] && echo "search $domain" >> "$tmpfile"
++		for i in $dns ; do
++			echo " Adding DNS server $i"
++			echo "nameserver $i" >> "$tmpfile"
++		done
++		mv "$tmpfile" "$realconf"
++		;;
++esac
++
++exit 0
+diff --git a/initrd/init-initrd b/initrd/init-initrd
+index 3327c76..2239169 100755
+--- a/initrd/init-initrd
++++ b/initrd/init-initrd
+@@ -73,27 +73,33 @@ gw=`cat /proc/cmdline | grep -o '\bgw=[^ ]*' | cut -d = -f 2`
  route=`cat /proc/cmdline | grep -o '\broute=[^ ]*' | cut -d = -f 2`
-+dns=`cat /proc/cmdline | grep -o '\bdns=[^ ]*' | cut -d = -f 2`
  if test "$ip"
  then
 -	# ipv4
@@ -1059,35 +652,146 @@ index 579559b..8297681 100755
 -		mkdir -p /mnt/etc
 -		echo "nameserver 2001:4860:4860::8888" > /mnt/etc/resolv.conf
 -	fi
-+    [ -z "$bridge" ] && bridge="eth0"
-+
 +    # ipv4
 +    if [ "$ip" != "${ip#*[0-9].[0-9]}" ]
 +    then
-+        ip link set dev "$bridge" up
-+        ip addr add "$ip" dev "$bridge"
++        ip link set dev eth0 up
++        ip addr add "$ip" dev eth0
 +        if [ "$route" ] && [ "$gw" ]
 +        then
-+            route add -net $route gw $gw "$bridge"
++            route add -net $route gw $gw eth0
 +        fi
 +        mkdir -p /mnt/etc
-+        [ -z "$dns" ] && dns="8.8.8.8"
-+        echo "nameserver $dns" > /mnt/etc/resolv.conf
++        echo "nameserver 8.8.8.8" > /mnt/etc/resolv.conf
 +    # ipv6
 +    elif [ "$ip" != "${ip#*:[0-9a-fA-F]}" ]
 +    then
-+        ip link set dev "$bridge" up
-+        ip addr add "$ip" dev "$bridge"
++        ip link set dev eth0 up
++        ip addr add "$ip" dev eth0
 +        if [ "$route" ] && [ "$gw" ]
 +        then
-+            route -A inet6 add $route gw $gw "$bridge"
++            route -A inet6 add $route gw $gw eth0
 +        fi
 +        mkdir -p /mnt/etc
-+        [ -z "$dns" ] && dns="2001:4860:4860::8888"
-+        echo "nameserver $dns" > /mnt/etc/resolv.conf
++        echo "nameserver 2001:4860:4860::8888" > /mnt/etc/resolv.conf
 +    fi
++else
++    # Attempt to get an IP configuration via DHCP
++    ip link set dev eth0 up
++    udhcpc -i eth0 -n -s /bin/configure-network -q >/dev/null
  fi
+ 
+ switch_root /mnt `cat /mnt/cmdline`
+diff --git a/initrd/make-initrd b/initrd/make-initrd
+index 21170e8..a94269c 100755
+--- a/initrd/make-initrd
++++ b/initrd/make-initrd
+@@ -64,6 +64,8 @@ cp "$base"/autologin $tmpdir/bin
+ chmod +x $tmpdir/bin/autologin
+ cp "$base"/enter $tmpdir/bin
+ chmod +x $tmpdir/bin/enter
++cp "$base"/configure-network $tmpdir/bin
++chmod +x $tmpdir/bin/configure-network
+ 
+ cd $tmpdir
+ find . | cpio --create --format='newc' > $tmpfile
+-- 
+2.33.0
+
+
+From fb240b2320bf77d88b3981a964bbec989abdacca Mon Sep 17 00:00:00 2001
+From: Ronan Abhamon <ronan.abhamon@vates.fr>
+Date: Tue, 21 Sep 2021 12:24:46 +0200
+Subject: [PATCH 04/29] wrap correctly user command context shutdown is now
+ supported execute user command using a valid tty remove old files
+
+Signed-off-by: Ronan Abhamon <ronan.abhamon@vates.fr>
+---
+ initrd/autologin   |  3 ---
+ initrd/enter       | 12 ++++++++----
+ initrd/init-initrd | 20 +++++++++++++++-----
+ initrd/inittab     |  2 --
+ initrd/make-initrd | 15 +++++----------
+ initrd/passwd      |  1 -
+ 6 files changed, 28 insertions(+), 25 deletions(-)
+ delete mode 100644 initrd/autologin
+ delete mode 100644 initrd/inittab
+ delete mode 100644 initrd/passwd
+
+diff --git a/initrd/autologin b/initrd/autologin
+deleted file mode 100644
+index c9b1092..0000000
+--- a/initrd/autologin
++++ /dev/null
+@@ -1,3 +0,0 @@
+-#!/bin/sh
+-
+-exec /bin/login -f root
+diff --git a/initrd/enter b/initrd/enter
+index f0086f0..1bd4b00 100644
+--- a/initrd/enter
++++ b/initrd/enter
+@@ -1,5 +1,9 @@
+-#!/bin/sh
++#!/run/initramfs/bin/ash
+ 
+-cmd=`cat /mnt/cmdline`
+-echo Executing $cmd
+-eval chroot /mnt $cmd
++BUSYBOX_DIR=/run/initramfs/bin
 +
++cmd=`$BUSYBOX_DIR/cat /cmdline`
++echo "Executing $cmd..."
++eval $cmd
++
++$BUSYBOX_DIR/poweroff -f
+diff --git a/initrd/init-initrd b/initrd/init-initrd
+index 2239169..ad5eb83 100755
+--- a/initrd/init-initrd
++++ b/initrd/init-initrd
+@@ -15,13 +15,14 @@ switch_initramfs()
+                 cp -a $directory $DEST 2>/dev/null
+             fi
+         done
++        cp /init $DEST
+ 
+         touch $DEST/etc/initramfs_moved
+         exec switch_root $DEST $0
+     fi
+ }
+ 
+-switch_root()
++switch_9p_root()
+ {
+     new_root=$1
+     echo "Switching root $1..."
+@@ -33,9 +34,18 @@ switch_root()
+     mount -t tmpfs tmpfs $new_root/run
+     mkdir -p $new_root/run/initramfs
+ 
+-    pivot_root $new_root $new_root/run/initramfs
+-    exec chroot / /bin/sh
+-    /bin/sh # Fallback if we can't execute the command.
++    # Relink some commands used in enter script.
++    # Relinking all commands has a cost of many seconds, so we do that only on required commands.
++    BUSYBOX_DIR=/run/initramfs/bin
++    for binary in ash cat chroot getty poweroff ; do
++        ln -s -f $BUSYBOX_DIR/busybox /bin/$binary
++    done
++
++    cd $new_root
++    pivot_root . $new_root/run/initramfs
++    exec $BUSYBOX_DIR/chroot . $BUSYBOX_DIR/getty -n -l $BUSYBOX_DIR/enter 115200 hvc0
++
++    $BUSYBOX_DIR/ash # Fallback if we can't execute the command.
+ }
+ 
+ # ==============================================================================
+@@ -102,4 +112,4 @@ else
+     udhcpc -i eth0 -n -s /bin/configure-network -q >/dev/null
+ fi
+ 
+-switch_root /mnt `cat /mnt/cmdline`
 +switch_9p_root /mnt
 diff --git a/initrd/inittab b/initrd/inittab
 deleted file mode 100644
@@ -1098,70 +802,24 @@ index cb26851..0000000
 -::sysinit:/etc/init.d/rcS
 -hvc0::respawn:/bin/getty -n -l /bin/autologin 115200 hvc0
 diff --git a/initrd/make-initrd b/initrd/make-initrd
-index 21170e8..3fe752f 100755
+index a94269c..48f6f74 100755
 --- a/initrd/make-initrd
 +++ b/initrd/make-initrd
-@@ -1,7 +1,12 @@
- #!/bin/bash
- 
-+busybox_path="$1"
-+if [ -z "$busybox_path" ]; then
-+    echo "Cannot make initrd, path is empty." >&2
-+    exit 1
-+fi
-+
- base="`pwd`/initrd"
--builddir="$base"/build
- outpath="$base"/out
- tmpdir=`mktemp -d`
- tmpfile=`mktemp`
-@@ -9,34 +14,19 @@ initrd=$outpath/initrd
- init="$base"/init-initrd
- rm -rf $tmpdir
- 
-+busybox_src_config="$base"/busybox.config
-+busybox="$busybox_path/busybox"
- 
--if test -z "$busybox"
--then
--    busybox_version=1.32.0
--    busybox_name=busybox-$busybox_version
--    busybox_tarball="$busybox_name".tar.bz2
--    busybox_url="https://busybox.net/downloads/""$busybox_tarball"
--    busybox_src_config="$base"/busybox.config
--    busybox_image="$builddir"/"$busybox_name"/busybox
+@@ -18,11 +18,11 @@ then
+     busybox_url="https://busybox.net/downloads/""$busybox_tarball"
+     busybox_src_config="$base"/busybox.config
+     busybox_image="$builddir"/"$busybox_name"/busybox
 -    
--    rm -rf $outpath
--    mkdir -p $outpath
--    mkdir -p $builddir
++
+     rm -rf $outpath
+     mkdir -p $outpath
+     mkdir -p $builddir
 -    
--    if [[ ! -f $builddir/$busybox_tarball ]]
--    then
--        wget -O $builddir/$busybox_tarball --tries=20 $busybox_url
--    fi
--    if [[ ! -d $builddir/$busybox_name ]]
--    then
--        tar --extract --bzip2 --touch --file="$builddir/$busybox_tarball" --directory="$builddir"
--    fi
--    cd $builddir/$busybox_name
--    cp $busybox_src_config .config
--    make -j "$(getconf _NPROCESSORS_ONLN)"
--    export busybox="$busybox_image"
--fi
-+rm -rf $outpath
-+mkdir -p $outpath
- 
-+old_wd=$(pwd)
 +
-+cd $busybox_path
-+cp $busybox_src_config .config
-+make -j "$(getconf _NPROCESSORS_ONLN)"
-+
-+cd "$old_wd"
- 
- mkdir -p $tmpdir/bin
- mkdir -p $tmpdir/sbin
-@@ -53,15 +43,10 @@ do
+     if [[ ! -f $builddir/$busybox_tarball ]]
+     then
+         wget -O $builddir/$busybox_tarball --tries=20 $busybox_url
+@@ -53,15 +53,10 @@ do
      ln -s /bin/busybox $tmpdir/bin/$i
  done
  
@@ -1179,7 +837,7 @@ index 21170e8..3fe752f 100755
 -chmod +x $tmpdir/bin/autologin
  cp "$base"/enter $tmpdir/bin
  chmod +x $tmpdir/bin/enter
- 
+ cp "$base"/configure-network $tmpdir/bin
 diff --git a/initrd/passwd b/initrd/passwd
 deleted file mode 100644
 index 69a2e2d..0000000
@@ -1187,8 +845,1488 @@ index 69a2e2d..0000000
 +++ /dev/null
 @@ -1 +0,0 @@
 -root::0:0:root:/:/bin/enter
+-- 
+2.33.0
+
+
+From 56a37e8acd1e6228b4c7617ad28e3c5dda0b4bee Mon Sep 17 00:00:00 2001
+From: Ronan Abhamon <ronan.abhamon@vates.fr>
+Date: Thu, 23 Sep 2021 17:00:08 +0200
+Subject: [PATCH 05/29] replace poweroff and handle some signals in init to
+ support correctly xe vm-shutdown
+
+Signed-off-by: Ronan Abhamon <ronan.abhamon@vates.fr>
+---
+ initrd/enter       | 11 ++++++++---
+ initrd/init-initrd | 15 ++++++++++++++-
+ 2 files changed, 22 insertions(+), 4 deletions(-)
+
+diff --git a/initrd/enter b/initrd/enter
+index 1bd4b00..bded338 100644
+--- a/initrd/enter
++++ b/initrd/enter
+@@ -2,8 +2,13 @@
+ 
+ BUSYBOX_DIR=/run/initramfs/bin
+ 
++poweroff_handler() {
++    $BUSYBOX_DIR/poweroff -f
++}
++
++trap poweroff_handler 0 USR1 USR2 TERM
++
+ cmd=`$BUSYBOX_DIR/cat /cmdline`
+ echo "Executing $cmd..."
+-eval $cmd
+-
+-$BUSYBOX_DIR/poweroff -f
++eval $cmd &
++wait
+diff --git a/initrd/init-initrd b/initrd/init-initrd
+index ad5eb83..0bba6ec 100755
+--- a/initrd/init-initrd
++++ b/initrd/init-initrd
+@@ -34,9 +34,22 @@ switch_9p_root()
+     mount -t tmpfs tmpfs $new_root/run
+     mkdir -p $new_root/run/initramfs
+ 
++    BUSYBOX_DIR=/run/initramfs/bin
++
++    # Replace poweroff binary because it is called by a PV hypercall when xe vm-shutdown command is executed.
++    # In many cases the default poweroff binary of the 9pfs depends on systemd or another program, but we don't use it.
++    mkdir -p $new_root/sbin
++    rm $new_root/sbin/poweroff 2>/dev/null
++    ln -s $BUSYBOX_DIR/busybox $new_root/sbin/poweroff
++
++    # Do the same thing for halt and reboot
++    rm $new_root/sbin/halt 2>/dev/null
++    rm $new_root/sbin/reboot 2>/dev/null
++    ln -s $BUSYBOX_DIR/busybox $new_root/sbin/halt
++    ln -s $BUSYBOX_DIR/busybox $new_root/sbin/reboot
++
+     # Relink some commands used in enter script.
+     # Relinking all commands has a cost of many seconds, so we do that only on required commands.
+-    BUSYBOX_DIR=/run/initramfs/bin
+     for binary in ash cat chroot getty poweroff ; do
+         ln -s -f $BUSYBOX_DIR/busybox /bin/$binary
+     done
+-- 
+2.33.0
+
+
+From cefbccb4fd9d6be8066c1d38a721e3fa3f943d09 Mon Sep 17 00:00:00 2001
+From: Ronan Abhamon <ronan.abhamon@vates.fr>
+Date: Thu, 23 Sep 2021 17:29:20 +0200
+Subject: [PATCH 06/29] kill and umount when user command has been executed
+
+Signed-off-by: Ronan Abhamon <ronan.abhamon@vates.fr>
+---
+ initrd/enter       | 10 ++++++++++
+ initrd/init-initrd |  2 +-
+ 2 files changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/initrd/enter b/initrd/enter
+index bded338..3cc624b 100644
+--- a/initrd/enter
++++ b/initrd/enter
+@@ -3,6 +3,16 @@
+ BUSYBOX_DIR=/run/initramfs/bin
+ 
+ poweroff_handler() {
++    $BUSYBOX_DIR/kill -s TERM -1
++    $BUSYBOX_DIR/sync
++    $BUSYBOX_DIR/sleep 1
++
++    $BUSYBOX_DIR/kill -s KILL -1
++    $BUSYBOX_DIR/sync
++    $BUSYBOX_DIR/sleep 1
++
++    $BUSYBOX_DIR/umount -a -r
++    $BUSYBOX_DIR/swapoff -a
+     $BUSYBOX_DIR/poweroff -f
+ }
+ 
+diff --git a/initrd/init-initrd b/initrd/init-initrd
+index 0bba6ec..d0ef37d 100755
+--- a/initrd/init-initrd
++++ b/initrd/init-initrd
+@@ -50,7 +50,7 @@ switch_9p_root()
+ 
+     # Relink some commands used in enter script.
+     # Relinking all commands has a cost of many seconds, so we do that only on required commands.
+-    for binary in ash cat chroot getty poweroff ; do
++    for binary in ash cat chroot getty kill poweroff sleep swapoff sync umount ; do
+         ln -s -f $BUSYBOX_DIR/busybox /bin/$binary
+     done
+ 
+-- 
+2.33.0
+
+
+From aeac2f0f784867cd85c7f68cba75339b82c2f58c Mon Sep 17 00:00:00 2001
+From: BenjiReis <benjamin.reis@vates.fr>
+Date: Thu, 23 Sep 2021 18:46:56 +0200
+Subject: [PATCH 07/29] udhcpc not needed + fix linter warnings
+
+Signed-off-by: BenjiReis <benjamin.reis@vates.fr>
+---
+ files/create             | 67 +++++++++++++++++++++-------------------
+ initrd/configure-network | 64 --------------------------------------
+ initrd/init-initrd       | 11 +++----
+ initrd/make-initrd       |  2 --
+ 4 files changed, 40 insertions(+), 104 deletions(-)
+ delete mode 100644 initrd/configure-network
+
+diff --git a/files/create b/files/create
+index 41aae85..d7e04ca 100755
+--- a/files/create
++++ b/files/create
+@@ -8,9 +8,9 @@ bundle=$( cat "$crundir"/bundle )
+ pidfile=$( cat "$crundir"/pidfile )
+ configfile="$bundle"/config.json
+ mountpoint=$( cat "$crundir"/rootfs )
+-appname=`cat $configfile | jq '.["Path"]'`
+-cmdline=\"`cat $configfile | jq  -c -r '.["process"]["args"] | join("\" \"")'`\"
+-env=`cat $configfile | jq  -c -r '.["process"]["env"] | join("\" \"")'`
++appname=$(cat "$configfile" | jq '.["Path"]')
++cmdline=\"$(cat "$configfile" | jq  -c -r '.["process"]["args"] | join("\" \"")')\"
++env=$(cat "$configfile" | jq  -c -r '.["process"]["env"] | join("\" \"")')
+ kernel="$workpath/kernel"
+ ramdisk="$workpath/initrd"
+ vm_uuid_file="$crundir/xcp_vm_uuid"
+@@ -19,7 +19,7 @@ vdi_uuid_file="$crundir/xcp_vdi_uuid"
+ sr_uuid=""
+ for i in $env
+ do
+-    i=$(echo $i | tr -d \")
++    i=$(echo "$i" | tr -d \")
+     if [[ $i = RUNX_KERNEL=* ]]
+     then
+         kernel=${i#RUNX_KERNEL=}
+@@ -60,21 +60,22 @@ then
+ fi
+ 
+ # netconf is file,type[,ip]
+-netconf=`cat $configfile | jq  -c -r  '.["process"]["env"][] | select(contains("NETCONF"))'`
+-netconf=`echo "$netconf" | awk -F "=" '{print $2}'`
++netconf=$(cat "$configfile" | jq  -c -r  '.["process"]["env"][] | select(contains("NETCONF"))')
++netconf=$(echo "$netconf" | awk -F "=" '{print $2}')
+ if test "$netconf"
+ then
+-    netfile=`echo "$netconf" | awk -F "," '{print $1}'`
+-    netname=`echo "$netconf" | awk -F "," '{print $2}'`
+-    netaddr=`echo "$netconf" | awk -F "," '{print $3}'`
+-    nettype=`cat $netfile | jq -c -r "select(.[\"name\"] == \"$netname\") | .[\"type\"]"`
++    netfile=$(echo "$netconf" | awk -F "," '{print $1}')
++    netname=$(echo "$netconf" | awk -F "," '{print $2}')
++    netaddr=$(echo "$netconf" | awk -F "," '{print $3}')
++    nettype=$(cat "$netfile" | jq -c -r "select(.[\"name\"] == \"$netname\") | .[\"type\"]")
+ 
+     if test "$nettype" = "bridge"
+     then
+         pvcalls=0
+-        bridge=`cat $netfile | jq -c -r "select(.[\"name\"] == \"$netname\") | .[\"bridge\"]"`
+-        gw=`cat $netfile | jq -c -r "select(.[\"name\"] == \"$netname\") | .[\"ipam\"][\"gateway\"]"`
+-        route=`cat $netfile | jq -c -r "select(.[\"name\"] == \"$netname\") | .[\"ipam\"][\"subnet\"]"`
++        bridge=$(cat "$netfile" | jq -c -r "select(.[\"name\"] == \"$netname\") | .[\"bridge\"]")
++        gw=$(cat "$netfile" | jq -c -r "select(.[\"name\"] == \"$netname\") | .[\"ipam\"][\"gateway\"]")
++        route=$(cat "$netfile" | jq -c -r "select(.[\"name\"] == \"$netname\") | .[\"ipam\"][\"subnet\"]")
++        dns=$(cat "$netfile" | jq -c -r "select(.[\"name\"] == \"$netname\") | .[\"dns\"][\"nameservers\"]")
+     else
+         #shouldn't get here, but if we do assume pvcalls
+         pvcalls=1
+@@ -85,25 +86,27 @@ fi
+ 
+ vm_name_label="container:$containerid"
+ 
+-vm_uuid=`xe vm-install new-name-label="$vm_name_label" template="$template_uuid" --minimal`
+-vdi_uuid=`xe vdi-create sr-uuid="$sr_uuid" name-label="$mountpoint" virtual-size=1KiB`
+-vbd_uuid=`xe vbd-create vm-uuid="$vm_uuid" device=1 vdi-uuid="$vdi_uuid" bootable=false mode=RW type=Disk`
+-
+-# TODO: Network.
+-# if test $pvcalls -eq 0
+-# then
+-#     if test "$netaddr"
+-#     then
+-#         echo extra=\'console=hvc0 root=9p rdinit=/bin/init ip=$netaddr gw=$gw route=$route\' >> $outconfig
+-#     else
+-#         echo extra=\'console=hvc0 root=9p rdinit=/bin/init ip=dhcp\' >> $outconfig
+-#     fi
+-# else
+-#     echo "pvcalls=['']" >> $outconfig
+-#     echo extra=\'console=hvc0 root=9p rdinit=/bin/init pvcalls=1\' >> $outconfig
+-# fi
+-
+-echo $cmdline > $mountpoint/cmdline
++vm_uuid=$(xe vm-install new-name-label="$vm_name_label" template="$template_uuid" --minimal)
++vdi_uuid=$(xe vdi-create sr-uuid="$sr_uuid" name-label="$mountpoint" virtual-size=1KiB)
++vbd_uuid=$(xe vbd-create vm-uuid="$vm_uuid" device=1 vdi-uuid="$vdi_uuid" bootable=false mode=RW type=Disk)
++
++pv_args=$(xe vm-param-get param-name=PV-args uuid=$vm_uuid)
++
++if test $pvcalls -eq 0
++then
++    if test "$netaddr"
++    then
++        pv_args="$pv_args ip=$netaddr gw=$gw route=$route dns=$dns bridge=$bridge"
++    else
++        pv_args="$pv_args ip=dhcp bridge=$bridge"
++    fi
++else
++    pv_args="$pv_args pvcalls=1"
++fi
++
++xe vm-param-set uuid="$vm_uuid" PV-args="$pv_args"
++
++echo "$cmdline" > "$mountpoint"/cmdline
+ 
+ echo -n "$vm_uuid" > "$vm_uuid_file"
+ echo -n "$vdi_uuid" > "$vdi_uuid_file"
+diff --git a/initrd/configure-network b/initrd/configure-network
+deleted file mode 100644
+index fbf1ad2..0000000
+--- a/initrd/configure-network
++++ /dev/null
+@@ -1,64 +0,0 @@
+-#!/bin/sh
+-# udhcpc script edited by Tim Riker <Tim@Rikers.org>
+-# Modified for XCP-ng integration.
+-
+-RESOLV_CONF="/mnt/etc/resolv.conf"
+-
+-[ -n "$1" ] || { echo "Error: should be called from udhcpc"; exit 1; }
+-
+-NETMASK=""
+-[ -n "$subnet" ] && NETMASK="/$subnet"
+-BROADCAST="broadcast +"
+-[ -n "$broadcast" ] && BROADCAST="broadcast $broadcast"
+-
+-case "$1" in
+-	deconfig)
+-		echo "Clearing IP addresses on $interface, upping it"
+-		ip -4 addr flush dev $interface
+-		ip link set dev $interface up
+-		;;
+-
+-	renew|bound)
+-		echo "Setting IP address $ip on $interface"
+-		ip addr add $ip$NETMASK $BROADCAST dev $interface
+-
+-		if [ -n "$router" ] ; then
+-			echo "Deleting routers"
+-			while route del default gw 0.0.0.0 dev $interface ; do
+-				:
+-			done
+-
+-			metric=0
+-			for i in $router ; do
+-				echo "Adding router $i"
+-				if [ "$subnet" = "255.255.255.255" ]; then
+-	# special case for /32 subnets:
+-	# /32 instructs kernel to always use routing for all outgoing packets
+-	# (they can never be sent to local subnet - there is no local subnet for /32).
+-	# Used in datacenters, avoids the need for private ip-addresses between two hops.
+-					ip route add $i dev $interface
+-				fi
+-				route add default gw $i dev $interface metric $((metric++))
+-			done
+-		fi
+-
+-		# If the file is a symlink somewhere (like /etc/resolv.conf
+-		# pointing to /run/resolv.conf), make sure things work.
+-		if test -L "$RESOLV_CONF"; then
+-			# If it's a dangling symlink, try to create the target.
+-			test -e "$RESOLV_CONF" || touch "$RESOLV_CONF"
+-		fi
+-		realconf=$(readlink -f "$RESOLV_CONF" 2>/dev/null || echo "$RESOLV_CONF")
+-		echo "Recreating $realconf"
+-		tmpfile="$realconf-$$"
+-		> "$tmpfile"
+-		[ -n "$domain" ] && echo "search $domain" >> "$tmpfile"
+-		for i in $dns ; do
+-			echo " Adding DNS server $i"
+-			echo "nameserver $i" >> "$tmpfile"
+-		done
+-		mv "$tmpfile" "$realconf"
+-		;;
+-esac
+-
+-exit 0
+diff --git a/initrd/init-initrd b/initrd/init-initrd
+index d0ef37d..227290c 100755
+--- a/initrd/init-initrd
++++ b/initrd/init-initrd
+@@ -94,6 +94,7 @@ mount -o bind /proc /mnt/proc
+ ip=`cat /proc/cmdline | grep -o '\bip=[^ ]*' | cut -d = -f 2`
+ gw=`cat /proc/cmdline | grep -o '\bgw=[^ ]*' | cut -d = -f 2`
+ route=`cat /proc/cmdline | grep -o '\broute=[^ ]*' | cut -d = -f 2`
++dns=`cat /proc/cmdline | grep -o '\bdns=[^ ]*' | cut -d = -f 2`
+ if test "$ip"
+ then
+     # ipv4
+@@ -106,7 +107,8 @@ then
+             route add -net $route gw $gw eth0
+         fi
+         mkdir -p /mnt/etc
+-        echo "nameserver 8.8.8.8" > /mnt/etc/resolv.conf
++        [ -z "$dns" ] && dns="8.8.8.8"
++        echo "nameserver $dns" > /mnt/etc/resolv.conf
+     # ipv6
+     elif [ "$ip" != "${ip#*:[0-9a-fA-F]}" ]
+     then
+@@ -117,12 +119,9 @@ then
+             route -A inet6 add $route gw $gw eth0
+         fi
+         mkdir -p /mnt/etc
+-        echo "nameserver 2001:4860:4860::8888" > /mnt/etc/resolv.conf
++        [ -z "$dns" ] && dns="2001:4860:4860::8888"
++        echo "nameserver $dns" > /mnt/etc/resolv.conf
+     fi
+-else
+-    # Attempt to get an IP configuration via DHCP
+-    ip link set dev eth0 up
+-    udhcpc -i eth0 -n -s /bin/configure-network -q >/dev/null
+ fi
+ 
+ switch_9p_root /mnt
+diff --git a/initrd/make-initrd b/initrd/make-initrd
+index 48f6f74..dd1b38f 100755
+--- a/initrd/make-initrd
++++ b/initrd/make-initrd
+@@ -59,8 +59,6 @@ ln -s -f /init $tmpdir/bin/init # Change default busybox init.
+ 
+ cp "$base"/enter $tmpdir/bin
+ chmod +x $tmpdir/bin/enter
+-cp "$base"/configure-network $tmpdir/bin
+-chmod +x $tmpdir/bin/configure-network
+ 
+ cd $tmpdir
+ find . | cpio --create --format='newc' > $tmpfile
+-- 
+2.33.0
+
+
+From c49b9f8f39a0eb026d0f9c408623a3faf48ad086 Mon Sep 17 00:00:00 2001
+From: Ronan Abhamon <ronan.abhamon@vates.fr>
+Date: Sat, 25 Sep 2021 00:00:22 +0200
+Subject: [PATCH 08/29] delete VM from XAPI when execution is finished
+
+Signed-off-by: Ronan Abhamon <ronan.abhamon@vates.fr>
+---
+ files/container | 21 +++++++++++++++++++++
+ files/create    |  4 +++-
+ files/start     |  1 +
+ 3 files changed, 25 insertions(+), 1 deletion(-)
+
+diff --git a/files/container b/files/container
+index 1eb1f8c..075aee1 100755
+--- a/files/container
++++ b/files/container
+@@ -7,7 +7,28 @@ workpath="$1"
+ vm_uuid="$2"
+ vdi_uuid="$3"
+ wrapper_pid="$4"
++container_cmd="$5"
+ 
+ trap '' INT ABRT
++
++domid=''
++read line <$container_cmd
++if [[ "$line" == 'start' ]]; then
++    domid=`list_domains | grep -i "$vm_uuid" | awk '{print $1}'`
++else
++    kill -9 $wrapper_pid
++fi
++
++if [[ $domid ]]; then
++    path=/local/domain/$domid
++    while read watch ; do
++        xenstore-read $path
++        if [ $? -ne 0 ]; then
++            kill $wrapper_pid
++            break
++        fi
++    done < <(xenstore-watch $path)
++fi
++
+ tail --pid="$wrapper_pid" -f /dev/null
+ "$workpath/delete" "$vm_uuid" "$vdi_uuid"
+diff --git a/files/create b/files/create
+index d7e04ca..93eccfe 100755
+--- a/files/create
++++ b/files/create
+@@ -15,6 +15,7 @@ kernel="$workpath/kernel"
+ ramdisk="$workpath/initrd"
+ vm_uuid_file="$crundir/xcp_vm_uuid"
+ vdi_uuid_file="$crundir/xcp_vdi_uuid"
++container_cmd="$crundir/container_cmd"
+ 
+ sr_uuid=""
+ for i in $env
+@@ -115,9 +116,10 @@ echo -n "$vdi_uuid" > "$vdi_uuid_file"
+ # This program can be destroyed by docker using "docker kill...", when this last one is killed, a second
+ # program called "container" executes "xe vm-destroy, vdi-destroy...".
+ # Otherwise with only one script we can't clean and shutdown properly the VM if a SIGKILL is received.
++mkfifo "$container_cmd"
+ "$workpath/container-wrapper" &
+ wrapper_pid="$!"
+-"$workpath/container" "$workpath" "$vm_uuid" "$vdi_uuid" "$wrapper_pid" &
++"$workpath/container" "$workpath" "$vm_uuid" "$vdi_uuid" "$wrapper_pid" "$container_cmd" &
+ 
+ # Set the PID to make Docker happy.
+ echo -n "$wrapper_pid" > "$pidfile"
+diff --git a/files/start b/files/start
+index 500f6ee..866c125 100755
+--- a/files/start
++++ b/files/start
+@@ -7,3 +7,4 @@ crundir="$3"
+ vm_uuid=$( cat "$crundir"/xcp_vm_uuid )
+ 
+ xe vm-start uuid="$vm_uuid"
++echo -n "start" > "$crundir/container_cmd"
+-- 
+2.33.0
+
+
+From 382db1dbe0bf6b3b516772388c5ef97b24ecdf98 Mon Sep 17 00:00:00 2001
+From: Ronan Abhamon <ronan.abhamon@vates.fr>
+Date: Mon, 27 Sep 2021 15:48:20 +0200
+Subject: [PATCH 09/29] ensure xenstore-watch is killed to notify shim when VM
+ is shutdown
+
+Signed-off-by: Ronan Abhamon <ronan.abhamon@vates.fr>
+---
+ files/container | 12 ++++++++----
+ files/create    |  6 +++---
+ files/start     |  2 +-
+ files/state     |  2 +-
+ 4 files changed, 13 insertions(+), 9 deletions(-)
+
+diff --git a/files/container b/files/container
+index 075aee1..4ec7682 100755
+--- a/files/container
++++ b/files/container
+@@ -7,12 +7,12 @@ workpath="$1"
+ vm_uuid="$2"
+ vdi_uuid="$3"
+ wrapper_pid="$4"
+-container_cmd="$5"
++container_pipe="$5"
+ 
+-trap '' INT ABRT
++trap '' INT TERM ABRT
+ 
+ domid=''
+-read line <$container_cmd
++read line <$container_pipe
+ if [[ "$line" == 'start' ]]; then
+     domid=`list_domains | grep -i "$vm_uuid" | awk '{print $1}'`
+ else
+@@ -21,14 +21,18 @@ fi
+ 
+ if [[ $domid ]]; then
+     path=/local/domain/$domid
++    xenstore-watch $path > $container_pipe &
++    watch_pid=$!
+     while read watch ; do
+         xenstore-read $path
+         if [ $? -ne 0 ]; then
+             kill $wrapper_pid
+             break
+         fi
+-    done < <(xenstore-watch $path)
++    done <$container_pipe
++    kill -9 $watch_pid
+ fi
+ 
+ tail --pid="$wrapper_pid" -f /dev/null
+ "$workpath/delete" "$vm_uuid" "$vdi_uuid"
++wait
+diff --git a/files/create b/files/create
+index 93eccfe..35a9030 100755
+--- a/files/create
++++ b/files/create
+@@ -15,7 +15,7 @@ kernel="$workpath/kernel"
+ ramdisk="$workpath/initrd"
+ vm_uuid_file="$crundir/xcp_vm_uuid"
+ vdi_uuid_file="$crundir/xcp_vdi_uuid"
+-container_cmd="$crundir/container_cmd"
++container_pipe="$crundir/container_pipe"
+ 
+ sr_uuid=""
+ for i in $env
+@@ -116,10 +116,10 @@ echo -n "$vdi_uuid" > "$vdi_uuid_file"
+ # This program can be destroyed by docker using "docker kill...", when this last one is killed, a second
+ # program called "container" executes "xe vm-destroy, vdi-destroy...".
+ # Otherwise with only one script we can't clean and shutdown properly the VM if a SIGKILL is received.
+-mkfifo "$container_cmd"
++mkfifo "$container_pipe"
+ "$workpath/container-wrapper" &
+ wrapper_pid="$!"
+-"$workpath/container" "$workpath" "$vm_uuid" "$vdi_uuid" "$wrapper_pid" "$container_cmd" &
++"$workpath/container" "$workpath" "$vm_uuid" "$vdi_uuid" "$wrapper_pid" "$container_pipe" &
+ 
+ # Set the PID to make Docker happy.
+ echo -n "$wrapper_pid" > "$pidfile"
+diff --git a/files/start b/files/start
+index 866c125..ffe5427 100755
+--- a/files/start
++++ b/files/start
+@@ -7,4 +7,4 @@ crundir="$3"
+ vm_uuid=$( cat "$crundir"/xcp_vm_uuid )
+ 
+ xe vm-start uuid="$vm_uuid"
+-echo -n "start" > "$crundir/container_cmd"
++echo -n "start" > "$crundir/container_pipe"
+diff --git a/files/state b/files/state
+index 3b2a087..e624954 100755
+--- a/files/state
++++ b/files/state
+@@ -21,7 +21,7 @@ then
+   fi
+ fi
+ 
+-pid=""
++pid="0"
+ if test -f "$pidfile"
+ then
+     pid=$( cat "$pidfile" )
+-- 
+2.33.0
+
+
+From ae05c9ac336684f1507209df0d788fe329154018 Mon Sep 17 00:00:00 2001
+From: Ronan Abhamon <ronan.abhamon@vates.fr>
+Date: Wed, 29 Sep 2021 14:08:42 +0200
+Subject: [PATCH 10/29] expose env variables to user program + cmdline is now
+ in /run/runx/cmdline
+
+Signed-off-by: Ronan Abhamon <ronan.abhamon@vates.fr>
+---
+ docs/initrd.md     |  2 +-
+ files/create       | 10 +++++++++-
+ initrd/enter       |  3 ++-
+ initrd/init-initrd |  2 +-
+ 4 files changed, 13 insertions(+), 4 deletions(-)
+
+diff --git a/docs/initrd.md b/docs/initrd.md
+index 92d9c10..82187a8 100644
+--- a/docs/initrd.md
++++ b/docs/initrd.md
+@@ -23,4 +23,4 @@ Otherwise, the three parameters are IP addresses, they can be ipv4 or ipv6. *ip*
+ 
+ Command line
+ ------------
+-The container application to run and its command line arguments (command line arguments for the application) are exposed to the RunX initrd via a special text file at the *root (/)* of the container filesystem. The file is named *cmdline*. The RunX initrd reads the content of the file and uses it to find the application to run and to pass command line arguments to it.
++The container application to run and its command line arguments (command line arguments for the application) are exposed to the RunX initrd via a special text file in */run/runx/* of the container filesystem. The file is named *cmdline*. The RunX initrd reads the content of the file and uses it to find the application to run and to pass command line arguments to it.
+diff --git a/files/create b/files/create
+index 35a9030..00b9538 100755
+--- a/files/create
++++ b/files/create
+@@ -107,7 +107,15 @@ fi
+ 
+ xe vm-param-set uuid="$vm_uuid" PV-args="$pv_args"
+ 
+-echo "$cmdline" > "$mountpoint"/cmdline
++runx_dir="$mountpoint/run/runx"
++
++# Set command line.
++mkdir -p "$runx_dir"
++echo "$cmdline" > "$runx_dir"/cmdline
++
++# Share ENV variables.
++env_variables=$(cat "$configfile" | jq  -c -r '.["process"]["env"] | join("\n")')
++echo "$env_variables" > "$runx_dir/env"
+ 
+ echo -n "$vm_uuid" > "$vm_uuid_file"
+ echo -n "$vdi_uuid" > "$vdi_uuid_file"
+diff --git a/initrd/enter b/initrd/enter
+index 3cc624b..cef7724 100644
+--- a/initrd/enter
++++ b/initrd/enter
+@@ -18,7 +18,8 @@ poweroff_handler() {
+ 
+ trap poweroff_handler 0 USR1 USR2 TERM
+ 
+-cmd=`$BUSYBOX_DIR/cat /cmdline`
++export $($BUSYBOX_DIR/cat /run/runx/env | $BUSYBOX_DIR/xargs)
++cmd=`$BUSYBOX_DIR/cat /run/runx/cmdline`
+ echo "Executing $cmd..."
+ eval $cmd &
+ wait
+diff --git a/initrd/init-initrd b/initrd/init-initrd
+index 227290c..62ccd98 100755
+--- a/initrd/init-initrd
++++ b/initrd/init-initrd
+@@ -50,7 +50,7 @@ switch_9p_root()
+ 
+     # Relink some commands used in enter script.
+     # Relinking all commands has a cost of many seconds, so we do that only on required commands.
+-    for binary in ash cat chroot getty kill poweroff sleep swapoff sync umount ; do
++    for binary in ash cat chroot getty kill poweroff sleep swapoff sync umount xargs ; do
+         ln -s -f $BUSYBOX_DIR/busybox /bin/$binary
+     done
+ 
+-- 
+2.33.0
+
+
+From 448ac516d205c6b292c8c4d00f0f3c13886e4d82 Mon Sep 17 00:00:00 2001
+From: Ronan Abhamon <ronan.abhamon@vates.fr>
+Date: Wed, 29 Sep 2021 14:09:38 +0200
+Subject: [PATCH 11/29] hide xe vm-shutdown and xenstore-read output (avoid
+ pollution of docker run)
+
+Signed-off-by: Ronan Abhamon <ronan.abhamon@vates.fr>
+---
+ files/container | 2 +-
+ files/delete    | 4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/files/container b/files/container
+index 4ec7682..982162e 100755
+--- a/files/container
++++ b/files/container
+@@ -24,7 +24,7 @@ if [[ $domid ]]; then
+     xenstore-watch $path > $container_pipe &
+     watch_pid=$!
+     while read watch ; do
+-        xenstore-read $path
++        xenstore-read $path &>/dev/null
+         if [ $? -ne 0 ]; then
+             kill $wrapper_pid
+             break
+diff --git a/files/delete b/files/delete
+index 49dd5ce..3e355d0 100755
+--- a/files/delete
++++ b/files/delete
+@@ -5,9 +5,9 @@ SHUTDOWN_TIMEOUT=30
+ vm_uuid=$1
+ vdi_uuid=$2
+ 
+-timeout $SHUTDOWN_TIMEOUT xe vm-shutdown uuid="$vm_uuid"
++timeout $SHUTDOWN_TIMEOUT xe vm-shutdown uuid="$vm_uuid" &>/dev/null
+ if [ $? -eq 124 ]; then
+-    xe vm-shutdown --force uuid="$vm_uuid"
++    xe vm-shutdown --force uuid="$vm_uuid" &>/dev/null
+ fi
+ 
+ xe vdi-destroy uuid="$vdi_uuid"
+-- 
+2.33.0
+
+
+From 645890d04edf86c7025f30c70914f6cac61d88c0 Mon Sep 17 00:00:00 2001
+From: Ronan Abhamon <ronan.abhamon@vates.fr>
+Date: Wed, 29 Sep 2021 14:42:05 +0200
+Subject: [PATCH 12/29] avoid usage of tmpfs in run dir
+
+I suppose it's not important if we modify a temporary FS (9p fs),
+but it would be or not a problem if another FS is used (a persistent VDI for example,
+outside container scope).
+
+Signed-off-by: Ronan Abhamon <ronan.abhamon@vates.fr>
+---
+ initrd/init-initrd | 2 --
+ 1 file changed, 2 deletions(-)
+
+diff --git a/initrd/init-initrd b/initrd/init-initrd
+index 62ccd98..c6b4f73 100755
+--- a/initrd/init-initrd
++++ b/initrd/init-initrd
+@@ -30,8 +30,6 @@ switch_9p_root()
+     umount /proc
+     umount /sys
+ 
+-    mkdir -p $new_root/run
+-    mount -t tmpfs tmpfs $new_root/run
+     mkdir -p $new_root/run/initramfs
+ 
+     BUSYBOX_DIR=/run/initramfs/bin
+-- 
+2.33.0
+
+
+From d694dbfd79922395b64bf02a8ef80c326fe27119 Mon Sep 17 00:00:00 2001
+From: Ronan Abhamon <ronan.abhamon@vates.fr>
+Date: Wed, 29 Sep 2021 14:59:57 +0200
+Subject: [PATCH 13/29] set hostname using env var
+
+Signed-off-by: Ronan Abhamon <ronan.abhamon@vates.fr>
+---
+ initrd/enter       | 5 +++++
+ initrd/init-initrd | 2 +-
+ 2 files changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/initrd/enter b/initrd/enter
+index cef7724..2528a26 100644
+--- a/initrd/enter
++++ b/initrd/enter
+@@ -19,6 +19,11 @@ poweroff_handler() {
+ trap poweroff_handler 0 USR1 USR2 TERM
+ 
+ export $($BUSYBOX_DIR/cat /run/runx/env | $BUSYBOX_DIR/xargs)
++
++if [ "$HOSTNAME" ]; then
++    $BUSYBOX_DIR/hostname "$HOSTNAME"
++fi
++
+ cmd=`$BUSYBOX_DIR/cat /run/runx/cmdline`
+ echo "Executing $cmd..."
+ eval $cmd &
+diff --git a/initrd/init-initrd b/initrd/init-initrd
+index c6b4f73..1a165b5 100755
+--- a/initrd/init-initrd
++++ b/initrd/init-initrd
+@@ -48,7 +48,7 @@ switch_9p_root()
+ 
+     # Relink some commands used in enter script.
+     # Relinking all commands has a cost of many seconds, so we do that only on required commands.
+-    for binary in ash cat chroot getty kill poweroff sleep swapoff sync umount xargs ; do
++    for binary in ash cat chroot getty hostname kill poweroff sleep swapoff sync umount xargs ; do
+         ln -s -f $BUSYBOX_DIR/busybox /bin/$binary
+     done
+ 
+-- 
+2.33.0
+
+
+From d6965de9a67fc0f57964ecc347a2a2031cf8fa1f Mon Sep 17 00:00:00 2001
+From: Ronan Abhamon <ronan.abhamon@vates.fr>
+Date: Wed, 29 Sep 2021 15:00:55 +0200
+Subject: [PATCH 14/29] avoid usage of SIGINT on enter script (prevent kernel
+ panic)
+
+Signed-off-by: Ronan Abhamon <ronan.abhamon@vates.fr>
+---
+ initrd/enter | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/initrd/enter b/initrd/enter
+index 2528a26..9b29d26 100644
+--- a/initrd/enter
++++ b/initrd/enter
+@@ -16,6 +16,7 @@ poweroff_handler() {
+     $BUSYBOX_DIR/poweroff -f
+ }
+ 
++trap '' INT
+ trap poweroff_handler 0 USR1 USR2 TERM
+ 
+ export $($BUSYBOX_DIR/cat /run/runx/env | $BUSYBOX_DIR/xargs)
+-- 
+2.33.0
+
+
+From c216c32ebb2b35d8ed724af5b382b889925bda6f Mon Sep 17 00:00:00 2001
+From: Ronan Abhamon <ronan.abhamon@vates.fr>
+Date: Thu, 30 Sep 2021 10:38:21 +0200
+Subject: [PATCH 15/29] use correct working dir + install config files
+
+Signed-off-by: Ronan Abhamon <ronan.abhamon@vates.fr>
+---
+ files/create       | 17 +++++++++++++++++
+ initrd/enter       | 10 ++++++++--
+ initrd/init-initrd |  2 ++
+ 3 files changed, 27 insertions(+), 2 deletions(-)
+
+diff --git a/files/create b/files/create
+index 00b9538..0986d63 100755
+--- a/files/create
++++ b/files/create
+@@ -117,6 +117,23 @@ echo "$cmdline" > "$runx_dir"/cmdline
+ env_variables=$(cat "$configfile" | jq  -c -r '.["process"]["env"] | join("\n")')
+ echo "$env_variables" > "$runx_dir/env"
+ 
++# Specify Working dir.
++working_dir=$(cat "$configfile" | jq  -c -r '.["process"]["cwd"]')
++echo -n "$working_dir" > "$runx_dir/working_dir"
++
++# Copy or bind config files.
++config_files=$(cat "$configfile" | jq -c -r '.["mounts"] | map(select(.destination == ("/etc/resolv.conf","/etc/hostname","/etc/hosts", "/run/secrets")) | "\(.source);\(.destination)") | .[]')
++for config in $config_files; do
++    config_source=${config%;*}
++    config_dest=${config#*;}
++
++    if [ -d "$config_source" ]; then
++        mount --bind "$config_source" "$config_dest"
++    elif [ -f "$config_source" ]; then
++        cp "$config_source" "$config_dest"
++    fi
++done
++
+ echo -n "$vm_uuid" > "$vm_uuid_file"
+ echo -n "$vdi_uuid" > "$vdi_uuid_file"
+ 
+diff --git a/initrd/enter b/initrd/enter
+index 9b29d26..1f0e3e6 100644
+--- a/initrd/enter
++++ b/initrd/enter
+@@ -1,6 +1,7 @@
+ #!/run/initramfs/bin/ash
+ 
+ BUSYBOX_DIR=/run/initramfs/bin
++CONFIG_DIR=/run/runx
+ 
+ poweroff_handler() {
+     $BUSYBOX_DIR/kill -s TERM -1
+@@ -19,13 +20,18 @@ poweroff_handler() {
+ trap '' INT
+ trap poweroff_handler 0 USR1 USR2 TERM
+ 
+-export $($BUSYBOX_DIR/cat /run/runx/env | $BUSYBOX_DIR/xargs)
++export $($BUSYBOX_DIR/cat $CONFIG_DIR/env | $BUSYBOX_DIR/xargs)
+ 
+ if [ "$HOSTNAME" ]; then
+     $BUSYBOX_DIR/hostname "$HOSTNAME"
+ fi
+ 
+-cmd=`$BUSYBOX_DIR/cat /run/runx/cmdline`
++working_dir=`$BUSYBOX_DIR/cat $CONFIG_DIR/working_dir`
++if [ "$working_dir" ]; then
++    cd "$working_dir"
++fi
++
++cmd=`$BUSYBOX_DIR/cat $CONFIG_DIR/cmdline`
+ echo "Executing $cmd..."
+ eval $cmd &
+ wait
+diff --git a/initrd/init-initrd b/initrd/init-initrd
+index 1a165b5..a594b4e 100755
+--- a/initrd/init-initrd
++++ b/initrd/init-initrd
+@@ -54,6 +54,8 @@ switch_9p_root()
+ 
+     cd $new_root
+     pivot_root . $new_root/run/initramfs
++    cd /
++
+     exec $BUSYBOX_DIR/chroot . $BUSYBOX_DIR/getty -n -l $BUSYBOX_DIR/enter 115200 hvc0
+ 
+     $BUSYBOX_DIR/ash # Fallback if we can't execute the command.
+-- 
+2.33.0
+
+
+From 354cf6bff4f2b7db8d8d5d04d11cc143811329ac Mon Sep 17 00:00:00 2001
+From: Ronan Abhamon <ronan.abhamon@vates.fr>
+Date: Thu, 30 Sep 2021 11:08:47 +0200
+Subject: [PATCH 16/29] change current user/group (in progress)
+
+Signed-off-by: Ronan Abhamon <ronan.abhamon@vates.fr>
+---
+ initrd/enter | 17 ++++++++++++++++-
+ 1 file changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/initrd/enter b/initrd/enter
+index 1f0e3e6..6a178b5 100644
+--- a/initrd/enter
++++ b/initrd/enter
+@@ -26,9 +26,24 @@ if [ "$HOSTNAME" ]; then
+     $BUSYBOX_DIR/hostname "$HOSTNAME"
+ fi
+ 
++# Try to chdir with root user.
+ working_dir=`$BUSYBOX_DIR/cat $CONFIG_DIR/working_dir`
+ if [ "$working_dir" ]; then
+-    cd "$working_dir"
++    cd "$working_dir" &>/dev/null
++    if [ $? -eq 0 ]; then
++        # Directory changed with success.
++        working_dir=""
++    fi
++fi
++
++# TODO: Change user/group here.
++
++# Retry chdir with new user if necessary.
++if [ "$working_dir" ]; then
++    cd "$working_dir" &>/dev/null
++    if [ $? -ne 0 ]; then
++        echo "Failed to change working dir!"
++    fi
+ fi
+ 
+ cmd=`$BUSYBOX_DIR/cat $CONFIG_DIR/cmdline`
+-- 
+2.33.0
+
+
+From fb82c2734ff4c5a0f052be95af8e338485a0be38 Mon Sep 17 00:00:00 2001
+From: Ronan Abhamon <ronan.abhamon@vates.fr>
+Date: Fri, 1 Oct 2021 14:27:21 +0200
+Subject: [PATCH 17/29] fix delete command + support force (for podman)
+
+Signed-off-by: Ronan Abhamon <ronan.abhamon@vates.fr>
+---
+ files/delete | 17 ++++++++++++-----
+ runX         | 19 +++++++++++++++----
+ 2 files changed, 27 insertions(+), 9 deletions(-)
+
+diff --git a/files/delete b/files/delete
+index 3e355d0..2dfa50f 100755
+--- a/files/delete
++++ b/files/delete
+@@ -5,10 +5,17 @@ SHUTDOWN_TIMEOUT=30
+ vm_uuid=$1
+ vdi_uuid=$2
+ 
+-timeout $SHUTDOWN_TIMEOUT xe vm-shutdown uuid="$vm_uuid" &>/dev/null
+-if [ $? -eq 124 ]; then
+-    xe vm-shutdown --force uuid="$vm_uuid" &>/dev/null
++if [ "$vm_uuid" ]; then
++    timeout $SHUTDOWN_TIMEOUT xe vm-shutdown uuid="$vm_uuid" &>/dev/null
++    if [ $? -eq 124 ]; then
++        xe vm-shutdown --force uuid="$vm_uuid" &>/dev/null
++    fi
+ fi
+ 
+-xe vdi-destroy uuid="$vdi_uuid"
+-xe vm-destroy uuid="$vm_uuid"
++if [ "$vdi_uuid" ]; then
++    xe vdi-destroy uuid="$vdi_uuid"
++fi
++
++if [ "$vm_uuid" ]; then
++    xe vm-destroy uuid="$vm_uuid"
++fi
+diff --git a/runX b/runX
+index b57872e..3d5fcec 100755
+--- a/runX
++++ b/runX
+@@ -9,6 +9,7 @@ root=""
+ bundle=""
+ pidfile=""
+ containerid=""
++force=false
+ while (( "$#" ))
+ do
+     if [[ $1 = "--root" ]]
+@@ -44,6 +45,12 @@ do
+         shift
+         continue
+     fi
++    if [[ $1 = "--force" ]]
++    then
++        force=true
++        shift
++        continue
++    fi
+     if [[ $1 = "--"* ]]
+     then
+         shift
+@@ -115,8 +122,10 @@ then
+     "$workpath/pause" "$workpath" $containerid "$crundir" resume
+ elif test $cmd = "kill"
+ then
+-    "$workpath/delete" `cat "$crundir"/xcp_vm_uuid` `cat "$crundir"/xcp_vdi_uuid`
+-    "$workpath/mount" "$crundir" unmount
++    if [ -f "$crundir/xcp_vm_uuid" ] && [ -f "$crundir/xcp_vdi_uuid" ]; then
++        "$workpath/delete" `cat "$crundir"/xcp_vm_uuid` `cat "$crundir"/xcp_vdi_uuid`
++        "$workpath/mount" "$crundir" unmount
++    fi
+ elif test $cmd = "create"
+ then
+     "$workpath/mount" "$crundir" mount
+@@ -143,8 +152,10 @@ then
+     exit 0 # Previous test can set $? to 1...
+ elif test $cmd = "delete"
+ then
+-    "$workpath/delete" "$workpath" $containerid "$crundir"
+-    "$workpath/mount" "$workpath" $containerid "$crundir" unmount
++    if [ -f "$crundir/xcp_vm_uuid" ] && [ -f "$crundir/xcp_vdi_uuid" ]; then
++        "$workpath/delete" `cat "$crundir"/xcp_vm_uuid` `cat "$crundir"/xcp_vdi_uuid`
++        "$workpath/mount" "$crundir" unmount
++    fi
+     rm -rf "$crundir"
+ else
+     :
+-- 
+2.33.0
+
+
+From d86d2df560f6c34e8f1230e297b9da94dcc682ce Mon Sep 17 00:00:00 2001
+From: Ronan Abhamon <ronan.abhamon@vates.fr>
+Date: Fri, 1 Oct 2021 16:50:12 +0200
+Subject: [PATCH 18/29] mount correctly source config dir if dest is not empty
+ + rm folder if necessary when source is a file
+
+Signed-off-by: Ronan Abhamon <ronan.abhamon@vates.fr>
+---
+ files/create | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/files/create b/files/create
+index 0986d63..f8a63d4 100755
+--- a/files/create
++++ b/files/create
+@@ -122,14 +122,16 @@ working_dir=$(cat "$configfile" | jq  -c -r '.["process"]["cwd"]')
+ echo -n "$working_dir" > "$runx_dir/working_dir"
+ 
+ # Copy or bind config files.
+-config_files=$(cat "$configfile" | jq -c -r '.["mounts"] | map(select(.destination == ("/etc/resolv.conf","/etc/hostname","/etc/hosts", "/run/secrets")) | "\(.source);\(.destination)") | .[]')
++config_files=$(cat "$configfile" | jq -c -r '.["mounts"] | map(select(.destination == ("/etc/resolv.conf","/etc/hostname","/etc/hosts","/run/secrets")) | "\(.source);\(.destination)") | .[]')
+ for config in $config_files; do
+     config_source=${config%;*}
+-    config_dest=${config#*;}
++    config_dest=$mountpoint/${config#*;}
+ 
+     if [ -d "$config_source" ]; then
+-        mount --bind "$config_source" "$config_dest"
++        mount -o nonempty --bind "$config_source" "$config_dest"
+     elif [ -f "$config_source" ]; then
++        # I don't know why but podman creates folders by default...
++        rm -rf "$config_dest"
+         cp "$config_source" "$config_dest"
+     fi
+ done
+-- 
+2.33.0
+
+
+From eb5f185f43dceba14677df19648d0ec4bcb79ee4 Mon Sep 17 00:00:00 2001
+From: Ronan Abhamon <ronan.abhamon@vates.fr>
+Date: Mon, 4 Oct 2021 15:17:27 +0200
+Subject: [PATCH 19/29] install and run guest tools + a path to rpms must be
+ specified in conf file
+
+Signed-off-by: Ronan Abhamon <ronan.abhamon@vates.fr>
+---
+ build.sh           | 10 +++++++---
+ config/runx.conf   |  3 +++
+ files/create       | 26 ++++++++++++++++++++------
+ files/env          |  2 --
+ initrd/enter       | 27 +++++++++++++++++++++++++++
+ initrd/init-initrd |  2 +-
+ initrd/make-initrd |  2 +-
+ 7 files changed, 59 insertions(+), 13 deletions(-)
+ create mode 100644 config/runx.conf
+ delete mode 100644 files/env
+
+diff --git a/build.sh b/build.sh
+index 305ca55..1c8cbc8 100755
+--- a/build.sh
++++ b/build.sh
+@@ -15,10 +15,11 @@
+ set -e
+ set -o pipefail
+ 
+-# Path to statically built busybox binary i.e.
+-# busybox=/usr/bin/busybox-static-aarch64
++execs="start delete state serial_start create pause mount container container-wrapper"
+ 
+-execs="start delete state serial_start create pause mount container container-wrapper env"
++kernel_path=""
++busybox_path=""
++params=""
+ 
+ # Clean the repo, but save the vendor area
+ if [ "x${1:-}" != "x" ] && [ "clean" == "$1" ]; then
+@@ -58,6 +59,9 @@ for i in $execs; do
+     cp files/$i target/usr/share/runX
+ done
+ 
++mkdir -p target/etc
++cp config/runx.conf target/etc
++
+ cd sendfd
+ make
+ cd ..
+diff --git a/config/runx.conf b/config/runx.conf
+new file mode 100644
+index 0000000..83f7e88
+--- /dev/null
++++ b/config/runx.conf
+@@ -0,0 +1,3 @@
++SR_UUID=
++TEMPLATE_UUID=
++GUEST_TOOLS=
+diff --git a/files/create b/files/create
+index f8a63d4..ef81ec7 100755
+--- a/files/create
++++ b/files/create
+@@ -17,7 +17,6 @@ vm_uuid_file="$crundir/xcp_vm_uuid"
+ vdi_uuid_file="$crundir/xcp_vdi_uuid"
+ container_pipe="$crundir/container_pipe"
+ 
+-sr_uuid=""
+ for i in $env
+ do
+     i=$(echo "$i" | tr -d \")
+@@ -33,16 +32,26 @@ do
+     fi
+ done
+ 
+-for i in $( cat $workpath/env )
++sr_uuid=""
++template_uuid=""
++guest_tools=""
++for i in $( cat /etc/runx.conf )
+ do
+     i=$(echo $i | tr -d \")
+-    if [[ $i = RUNX_SR_UUID=* ]]
++    if [[ $i = SR_UUID=* ]]
++    then
++        sr_uuid=${i#SR_UUID=}
++    fi
++    if [[ $i = TEMPLATE_UUID=* ]]
+     then
+-        sr_uuid=${i#RUNX_SR_UUID=}
++        template_uuid=${i#TEMPLATE_UUID=}
+     fi
+-    if [[ $i = RUNX_TEMPLATE_UUID=* ]]
++    if [[ $i = GUEST_TOOLS=* ]]
+     then
+-        template_uuid=${i#RUNX_TEMPLATE_UUID=}
++        guest_tools=${i#GUEST_TOOLS=}
++        if [ -f "$guest_tools" ]; then
++            guest_tools=$(cat "$guest_tools")
++        fi
+     fi
+ done
+ 
+@@ -109,6 +118,11 @@ xe vm-param-set uuid="$vm_uuid" PV-args="$pv_args"
+ 
+ runx_dir="$mountpoint/run/runx"
+ 
++# Install tools.
++if [ "$guest_tools" ]; then
++    rpm -i --prefix="$mountpoint" "$guest_tools/*.rpm"
++fi
++
+ # Set command line.
+ mkdir -p "$runx_dir"
+ echo "$cmdline" > "$runx_dir"/cmdline
+diff --git a/files/env b/files/env
+deleted file mode 100644
+index b893711..0000000
+--- a/files/env
++++ /dev/null
+@@ -1,2 +0,0 @@
+-RUNX_SR_UUID=f09ca0f6-c32e-ffdd-858a-17a8fcb303b9
+-RUNX_TEMPLATE_UUID=1cab9056-f9af-1a13-76c6-7d4cb6f4dee4
+diff --git a/initrd/enter b/initrd/enter
+index 6a178b5..025e5fe 100644
+--- a/initrd/enter
++++ b/initrd/enter
+@@ -2,6 +2,7 @@
+ 
+ BUSYBOX_DIR=/run/initramfs/bin
+ CONFIG_DIR=/run/runx
++XE_DAEMON=/usr/bin/xe-daemon
+ 
+ poweroff_handler() {
+     $BUSYBOX_DIR/kill -s TERM -1
+@@ -26,6 +27,27 @@ if [ "$HOSTNAME" ]; then
+     $BUSYBOX_DIR/hostname "$HOSTNAME"
+ fi
+ 
++# Run guest tools.
++distro="runx"
++major="1"
++minor="2"
++uname=$($BUSYBOX_DIR/uname -r)
++name="runx"
++
++$BUSYBOX_DIR/cat >/var/cache/xe-linux-distribution <<EOL
++os_distro="${distro}"
++os_majorver="${major}"
++os_minorver="${minor}"
++os_uname="${uname}"
++os_name="${name}"
++EOL
++
++xe_daemon_pid=""
++if [ -f "$XE_DAEMON" ]; then
++    $XE_DAEMON &
++    xe_daemon_pid=$!
++fi
++
+ # Try to chdir with root user.
+ working_dir=`$BUSYBOX_DIR/cat $CONFIG_DIR/working_dir`
+ if [ "$working_dir" ]; then
+@@ -49,4 +71,9 @@ fi
+ cmd=`$BUSYBOX_DIR/cat $CONFIG_DIR/cmdline`
+ echo "Executing $cmd..."
+ eval $cmd &
++
++if [ "$xe_daemon_pid" ]; then
++    $BUSYBOX_DIR/kill $xe_daemon_pid
++fi
++
+ wait
+diff --git a/initrd/init-initrd b/initrd/init-initrd
+index a594b4e..39e7f3d 100755
+--- a/initrd/init-initrd
++++ b/initrd/init-initrd
+@@ -48,7 +48,7 @@ switch_9p_root()
+ 
+     # Relink some commands used in enter script.
+     # Relinking all commands has a cost of many seconds, so we do that only on required commands.
+-    for binary in ash cat chroot getty hostname kill poweroff sleep swapoff sync umount xargs ; do
++    for binary in ash cat chroot getty hostname kill poweroff sleep swapoff sync umount uname xargs ; do
+         ln -s -f $BUSYBOX_DIR/busybox /bin/$binary
+     done
+ 
+diff --git a/initrd/make-initrd b/initrd/make-initrd
+index dd1b38f..8591b86 100755
+--- a/initrd/make-initrd
++++ b/initrd/make-initrd
+@@ -25,7 +25,7 @@ then
+ 
+     if [[ ! -f $builddir/$busybox_tarball ]]
+     then
+-        wget -O $builddir/$busybox_tarball --tries=20 $busybox_url
++        wget --no-check-certificate -O $builddir/$busybox_tarball --tries=20 $busybox_url
+     fi
+     if [[ ! -d $builddir/$busybox_name ]]
+     then
+-- 
+2.33.0
+
+
+From 845df5531643035b2444bfcf8cc11d66d677dd15 Mon Sep 17 00:00:00 2001
+From: BenjiReis <benjamin.reis@vates.fr>
+Date: Tue, 5 Oct 2021 09:39:13 +0200
+Subject: [PATCH 20/29] IP settings for all containers + default bridge is eth0
+
+Signed-off-by: BenjiReis <benjamin.reis@vates.fr>
+---
+ files/create       | 11 +++--------
+ initrd/init-initrd | 14 ++++++++------
+ 2 files changed, 11 insertions(+), 14 deletions(-)
+
+diff --git a/files/create b/files/create
+index ef81ec7..1e8cf04 100755
+--- a/files/create
++++ b/files/create
+@@ -102,16 +102,11 @@ vbd_uuid=$(xe vbd-create vm-uuid="$vm_uuid" device=1 vdi-uuid="$vdi_uuid" bootab
+ 
+ pv_args=$(xe vm-param-get param-name=PV-args uuid=$vm_uuid)
+ 
+-if test $pvcalls -eq 0
++if test "$netaddr"
+ then
+-    if test "$netaddr"
+-    then
+-        pv_args="$pv_args ip=$netaddr gw=$gw route=$route dns=$dns bridge=$bridge"
+-    else
+-        pv_args="$pv_args ip=dhcp bridge=$bridge"
+-    fi
++    pv_args="$pv_args ip=$netaddr gw=$gw route=$route dns=$dns bridge=$bridge"
+ else
+-    pv_args="$pv_args pvcalls=1"
++    pv_args="$pv_args ip=dhcp bridge=$bridge"
+ fi
+ 
+ xe vm-param-set uuid="$vm_uuid" PV-args="$pv_args"
+diff --git a/initrd/init-initrd b/initrd/init-initrd
+index 39e7f3d..8297681 100755
+--- a/initrd/init-initrd
++++ b/initrd/init-initrd
+@@ -97,14 +97,16 @@ route=`cat /proc/cmdline | grep -o '\broute=[^ ]*' | cut -d = -f 2`
+ dns=`cat /proc/cmdline | grep -o '\bdns=[^ ]*' | cut -d = -f 2`
+ if test "$ip"
+ then
++    [ -z "$bridge" ] && bridge="eth0"
++
+     # ipv4
+     if [ "$ip" != "${ip#*[0-9].[0-9]}" ]
+     then
+-        ip link set dev eth0 up
+-        ip addr add "$ip" dev eth0
++        ip link set dev "$bridge" up
++        ip addr add "$ip" dev "$bridge"
+         if [ "$route" ] && [ "$gw" ]
+         then
+-            route add -net $route gw $gw eth0
++            route add -net $route gw $gw "$bridge"
+         fi
+         mkdir -p /mnt/etc
+         [ -z "$dns" ] && dns="8.8.8.8"
+@@ -112,11 +114,11 @@ then
+     # ipv6
+     elif [ "$ip" != "${ip#*:[0-9a-fA-F]}" ]
+     then
+-        ip link set dev eth0 up
+-        ip addr add "$ip" dev eth0
++        ip link set dev "$bridge" up
++        ip addr add "$ip" dev "$bridge"
+         if [ "$route" ] && [ "$gw" ]
+         then
+-            route -A inet6 add $route gw $gw eth0
++            route -A inet6 add $route gw $gw "$bridge"
+         fi
+         mkdir -p /mnt/etc
+         [ -z "$dns" ] && dns="2001:4860:4860::8888"
+-- 
+2.33.0
+
+
+From 4c6028444c4b0ccfb0cb0ee3b61f0d0b5ff1b6bb Mon Sep 17 00:00:00 2001
+From: Ronan Abhamon <ronan.abhamon@vates.fr>
+Date: Wed, 6 Oct 2021 14:24:39 +0200
+Subject: [PATCH 21/29] add .gitignore
+
+Signed-off-by: Ronan Abhamon <ronan.abhamon@vates.fr>
+---
+ .gitignore | 6 ++++++
+ 1 file changed, 6 insertions(+)
+ create mode 100644 .gitignore
+
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..1a96e9d
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,6 @@
++.config
++initrd/out
++kernel/out
++sendfd/*.o
++sendfd/sendfd
++target
+-- 
+2.33.0
+
+
+From 50d1d44a9bbe86bdf9e3353394ea133b68612c41 Mon Sep 17 00:00:00 2001
+From: Ronan Abhamon <ronan.abhamon@vates.fr>
+Date: Wed, 6 Oct 2021 15:31:11 +0200
+Subject: [PATCH 22/29] avoid wget to build kernel and busybox, use local paths
+
+Signed-off-by: Ronan Abhamon <ronan.abhamon@vates.fr>
+---
+ build.sh                                      |  33 ++-
+ initrd/make-initrd                            |  40 ++--
+ kernel/make-kernel                            |  30 +--
+ .../patches/0001-patch-pvcalls_enable.patch   | 190 ------------------
+ 4 files changed, 52 insertions(+), 241 deletions(-)
+ delete mode 100644 kernel/patches/0001-patch-pvcalls_enable.patch
+
+diff --git a/build.sh b/build.sh
+index 1c8cbc8..3780fa0 100755
+--- a/build.sh
++++ b/build.sh
+@@ -21,6 +21,30 @@ kernel_path=""
+ busybox_path=""
+ params=""
+ 
++while (( "$#" )); do
++    case "$1" in
++        --kernel-path)
++            kernel_path=$2
++            shift
++            shift
++            ;;
++        --busybox-path)
++            busybox_path=$2
++            shift
++            shift
++            ;;
++        -*|--*=)
++            echo "Unknown option: $1" >&2
++            exit 1
++            ;;
++        *)
++            params="$1"
++            shift
++            ;;
++    esac
++done
++set -- "${params[@]}"
++
+ # Clean the repo, but save the vendor area
+ if [ "x${1:-}" != "x" ] && [ "clean" == "$1" ]; then
+     echo "cleaning project"
+@@ -35,6 +59,11 @@ if [ "x${1:-}" != "x" ] && [ "clean" == "$1" ]; then
+     exit 0
+ fi
+ 
++if [ -z "$kernel_path" ] || [ -z "$busybox_path" ]; then
++    echo "Expected kernel and busybox paths." >&2
++    exit 1
++fi
++
+ # Support cross-compiling via ARCH variable
+ if [[ -z "$ARCH" ]]
+ then
+@@ -73,11 +102,11 @@ cp runX target/usr/sbin
+ # Build the kernel and initrd
+ if test \! -f target/usr/share/runX/kernel
+ then
+-    kernel/make-kernel
++    kernel/make-kernel "$kernel_path"
+     cp kernel/out/kernel target/usr/share/runX
+ fi
+ if test \! -f target/usr/share/runX/initrd
+ then
+-    initrd/make-initrd
++    initrd/make-initrd "$busybox_path"
+     cp initrd/out/initrd target/usr/share/runX
+ fi
+diff --git a/initrd/make-initrd b/initrd/make-initrd
+index 8591b86..6c8b717 100755
+--- a/initrd/make-initrd
++++ b/initrd/make-initrd
+@@ -1,7 +1,12 @@
+ #!/bin/bash
+ 
++busybox_path="$1"
++if [ -z "$busybox_path" ]; then
++    echo "Cannot make initrd, path is empty." >&2
++    exit 1
++fi
++
+ base="`pwd`/initrd"
+-builddir="$base"/build
+ outpath="$base"/out
+ tmpdir=`mktemp -d`
+ tmpfile=`mktemp`
+@@ -9,34 +14,15 @@ initrd=$outpath/initrd
+ init="$base"/init-initrd
+ rm -rf $tmpdir
+ 
++busybox_src_config="$base"/busybox.config
++busybox="$busybox_path/busybox"
+ 
+-if test -z "$busybox"
+-then
+-    busybox_version=1.32.0
+-    busybox_name=busybox-$busybox_version
+-    busybox_tarball="$busybox_name".tar.bz2
+-    busybox_url="https://busybox.net/downloads/""$busybox_tarball"
+-    busybox_src_config="$base"/busybox.config
+-    busybox_image="$builddir"/"$busybox_name"/busybox
+-
+-    rm -rf $outpath
+-    mkdir -p $outpath
+-    mkdir -p $builddir
+-
+-    if [[ ! -f $builddir/$busybox_tarball ]]
+-    then
+-        wget --no-check-certificate -O $builddir/$busybox_tarball --tries=20 $busybox_url
+-    fi
+-    if [[ ! -d $builddir/$busybox_name ]]
+-    then
+-        tar --extract --bzip2 --touch --file="$builddir/$busybox_tarball" --directory="$builddir"
+-    fi
+-    cd $builddir/$busybox_name
+-    cp $busybox_src_config .config
+-    make -j "$(getconf _NPROCESSORS_ONLN)"
+-    export busybox="$busybox_image"
+-fi
++rm -rf $outpath
++mkdir -p $outpath
+ 
++cd $busybox_path
++cp $busybox_src_config .config
++make -j "$(getconf _NPROCESSORS_ONLN)"
+ 
+ mkdir -p $tmpdir/bin
+ mkdir -p $tmpdir/sbin
 diff --git a/kernel/make-kernel b/kernel/make-kernel
-index 538adb7..7a777ed 100755
+index 538adb7..7c04494 100755
 --- a/kernel/make-kernel
 +++ b/kernel/make-kernel
 @@ -1,5 +1,11 @@
@@ -1203,7 +2341,7 @@ index 538adb7..7a777ed 100755
  if [[ $ARCH = "x86"  ]]
  then
      image="bzImage"
-@@ -13,37 +19,20 @@ fi
+@@ -13,36 +19,16 @@ fi
  
  kernel_stuffdir=`readlink -f kernel`
  kernel_outpath=$kernel_stuffdir/out
@@ -1238,14 +2376,10 @@ index 538adb7..7a777ed 100755
 -    done
 -fi
 -cd $kernel_builddir/$kernel_name
-+old_wd=$(pwd)
-+
 +cd $kernel_path
  cp $kernel_src_config .config
  make -j "$(getconf _NPROCESSORS_ONLN)" $image
  
-+cd "$old_wd"
- cp $kernel_image $kernel_out
 diff --git a/kernel/patches/0001-patch-pvcalls_enable.patch b/kernel/patches/0001-patch-pvcalls_enable.patch
 deleted file mode 100644
 index 71b2430..0000000
@@ -1442,107 +2576,485 @@ index 71b2430..0000000
 - 	for (q = inetsw_array; q < &inetsw_array[INETSW_ARRAY_LEN]; ++q)
 - 		inet_register_protosw(q);
 - 
+-- 
+2.33.0
+
+
+From 5a63378eebf538ffc1f67993d9b23d24be30fd31 Mon Sep 17 00:00:00 2001
+From: Ronan Abhamon <ronan.abhamon@vates.fr>
+Date: Thu, 7 Oct 2021 15:24:43 +0200
+Subject: [PATCH 23/29] copy correctly kernel image after build if relative
+ path is used
+
+Signed-off-by: Ronan Abhamon <ronan.abhamon@vates.fr>
+---
+ kernel/make-kernel | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/kernel/make-kernel b/kernel/make-kernel
+index 7c04494..7a777ed 100755
+--- a/kernel/make-kernel
++++ b/kernel/make-kernel
+@@ -28,8 +28,11 @@ kernel_image="$kernel_path"/arch/"$ARCH"/boot/"$image"
+ rm -rf $kernel_outpath
+ mkdir -p $kernel_outpath
+ 
++old_wd=$(pwd)
++
+ cd $kernel_path
+ cp $kernel_src_config .config
+ make -j "$(getconf _NPROCESSORS_ONLN)" $image
+ 
++cd "$old_wd"
+ cp $kernel_image $kernel_out
+-- 
+2.33.0
+
+
+From 9004040898903ef1d0310ac30bb16d1f0faf65b7 Mon Sep 17 00:00:00 2001
+From: Ronan Abhamon <ronan.abhamon@vates.fr>
+Date: Thu, 7 Oct 2021 15:42:15 +0200
+Subject: [PATCH 24/29] copy correctly busybox after build if relative path is
+ used
+
+---
+ initrd/make-initrd | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/initrd/make-initrd b/initrd/make-initrd
+index 6c8b717..3fe752f 100755
+--- a/initrd/make-initrd
++++ b/initrd/make-initrd
+@@ -20,10 +20,14 @@ busybox="$busybox_path/busybox"
+ rm -rf $outpath
+ mkdir -p $outpath
+ 
++old_wd=$(pwd)
++
+ cd $busybox_path
+ cp $busybox_src_config .config
+ make -j "$(getconf _NPROCESSORS_ONLN)"
+ 
++cd "$old_wd"
++
+ mkdir -p $tmpdir/bin
+ mkdir -p $tmpdir/sbin
+ mkdir -p $tmpdir/etc
+-- 
+2.33.0
+
+
+From d4d00b96401095b295b54b26c7be24c17dfc07d0 Mon Sep 17 00:00:00 2001
+From: Ronan Abhamon <ronan.abhamon@vates.fr>
+Date: Thu, 7 Oct 2021 17:03:21 +0200
+Subject: [PATCH 25/29] use system workpath dir
+
+Signed-off-by: Ronan Abhamon <ronan.abhamon@vates.fr>
+---
+ runX | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/runX b/runX
+index 3d5fcec..8431580 100755
+--- a/runX
++++ b/runX
+@@ -1,6 +1,6 @@
+ #!/bin/bash
+ 
+-workpath=/root/Projects/runx/files/
++workpath=/usr/share/runX/
+ rundir=/run/runX
+ 
+ guestconsole=""
+-- 
+2.33.0
+
+
+From b2b210699f38d4fbd5fd6e62f1a5d296d0562506 Mon Sep 17 00:00:00 2001
+From: Ronan Abhamon <ronan.abhamon@vates.fr>
+Date: Thu, 7 Oct 2021 17:04:02 +0200
+Subject: [PATCH 26/29] add podman config
+
+Signed-off-by: Ronan Abhamon <ronan.abhamon@vates.fr>
+---
+ config/99-podman-runx.conflist |   9 ++
+ config/libpod.conf             | 157 +++++++++++++++++++++++++++++++++
+ 2 files changed, 166 insertions(+)
+ create mode 100644 config/99-podman-runx.conflist
+ create mode 100644 config/libpod.conf
+
+diff --git a/config/99-podman-runx.conflist b/config/99-podman-runx.conflist
+new file mode 100644
+index 0000000..fcaa102
+--- /dev/null
++++ b/config/99-podman-runx.conflist
+@@ -0,0 +1,9 @@
++{
++    "cniVersion": "0.4.0",
++    "name": "runx",
++    "plugins": [
++        {
++            "type": "loopback"
++        }
++    ]
++}
+diff --git a/config/libpod.conf b/config/libpod.conf
+new file mode 100644
+index 0000000..cef3fb7
+--- /dev/null
++++ b/config/libpod.conf
+@@ -0,0 +1,157 @@
++# libpod.conf is the default configuration file for all tools using libpod to
++# manage containers
++
++# Default transport method for pulling and pushing for images
++image_default_transport = "docker://"
++
++# Paths to look for the conmon container manager binary.
++# If the paths are empty or no valid path was found, then the `$PATH`
++# environment variable will be used as the fallback.
++conmon_path = [
++            "/usr/libexec/podman/conmon",
++            "/usr/local/libexec/podman/conmon",
++            "/usr/local/lib/podman/conmon",
++            "/usr/bin/conmon",
++            "/usr/sbin/conmon",
++            "/usr/local/bin/conmon",
++            "/usr/local/sbin/conmon",
++            "/run/current-system/sw/bin/conmon",
++]
++
++# Environment variables to pass into conmon
++conmon_env_vars = [
++                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
++]
++
++# CGroup Manager - valid values are "systemd" and "cgroupfs"
++cgroup_manager = "systemd"
++
++# Container init binary
++#init_path = "/usr/libexec/podman/catatonit"
++
++# Directory for persistent libpod files (database, etc)
++# By default, this will be configured relative to where containers/storage
++# stores containers
++# Uncomment to change location from this default
++#static_dir = "/var/lib/containers/storage/libpod"
++
++# Directory for temporary files. Must be tmpfs (wiped after reboot)
++tmp_dir = "/var/run/libpod"
++
++# Maximum size of log files (in bytes)
++# -1 is unlimited
++max_log_size = -1
++
++# Whether to use chroot instead of pivot_root in the runtime
++no_pivot_root = false
++
++# Directory containing CNI plugin configuration files
++cni_config_dir = "/etc/cni/net.d/"
++
++# Directories where the CNI plugin binaries may be located
++cni_plugin_dir = [
++               "/usr/libexec/cni",
++               "/usr/lib/cni",
++               "/usr/local/lib/cni",
++               "/opt/cni/bin"
++]
++
++# Default CNI network for libpod.
++# If multiple CNI network configs are present, libpod will use the network with
++# the name given here for containers unless explicitly overridden.
++# The default here is set to the name we set in the
++# 87-podman-bridge.conflist included in the repository.
++# Not setting this, or setting it to the empty string, will use normal CNI
++# precedence rules for selecting between multiple networks.
++cni_default_network = "runx"
++
++# Default libpod namespace
++# If libpod is joined to a namespace, it will see only containers and pods
++# that were created in the same namespace, and will create new containers and
++# pods in that namespace.
++# The default namespace is "", which corresponds to no namespace. When no
++# namespace is set, all containers and pods are visible.
++#namespace = ""
++
++# Default infra (pause) image name for pod infra containers
++infra_image = "k8s.gcr.io/pause:3.1"
++
++# Default command to run the infra container
++infra_command = "/pause"
++
++# Determines whether libpod will reserve ports on the host when they are
++# forwarded to containers. When enabled, when ports are forwarded to containers,
++# they are held open by conmon as long as the container is running, ensuring that
++# they cannot be reused by other programs on the host. However, this can cause
++# significant memory usage if a container has many ports forwarded to it.
++# Disabling this can save memory.
++#enable_port_reservation = true
++
++# Default libpod support for container labeling
++# label=true
++
++# The locking mechanism to use
++lock_type = "shm"
++
++# Number of locks available for containers and pods.
++# If this is changed, a lock renumber must be performed (e.g. with the
++# 'podman system renumber' command).
++num_locks = 2048
++
++# Directory for libpod named volumes.
++# By default, this will be configured relative to where containers/storage
++# stores containers.
++# Uncomment to change location from this default.
++#volume_path = "/var/lib/containers/storage/volumes"
++
++# Selects which logging mechanism to use for Podman events.  Valid values
++# are `journald` or `file`.
++# events_logger = "journald"
++
++# Specify the keys sequence used to detach a container.
++# Format is a single character [a-Z] or a comma separated sequence of
++# `ctrl-<value>`, where `<value>` is one of:
++# `a-z`, `@`, `^`, `[`, `\`, `]`, `^` or `_`
++#
++# detach_keys = "ctrl-p,ctrl-q"
++
++# Default OCI runtime
++runtime = "runx"
++
++# List of the OCI runtimes that support --format=json.  When json is supported
++# libpod will use it for reporting nicer errors.
++runtime_supports_json = ["runx"]
++
++# List of all the OCI runtimes that support --cgroup-manager=disable to disable
++# creation of CGroups for containers.
++runtime_supports_nocgroups = ["runx"]
++
++# Paths to look for a valid OCI runtime (runc, runv, etc)
++# If the paths are empty or no valid path was found, then the `$PATH`
++# environment variable will be used as the fallback.
++[runtimes]
++runc = [
++            "/usr/bin/runc",
++            "/usr/sbin/runc",
++            "/usr/local/bin/runc",
++            "/usr/local/sbin/runc",
++            "/sbin/runc",
++            "/bin/runc",
++            "/usr/lib/cri-o-runc/sbin/runc",
++            "/run/current-system/sw/bin/runc",
++]
++
++crun = [
++            "/usr/bin/crun",
++            "/usr/local/bin/crun",
++]
++
++runx = [
++            "/usr/bin/runx"
++]
++
++# The [runtimes] table MUST be the last thing in this file.
++# (Unless another table is added)
++# TOML does not provide a way to end a table other than a further table being
++# defined, so every key hereafter will be part of [runtimes] and not the main
++# config.
+-- 
+2.33.0
+
+
+From d43385f20cd303d6adeabd4f7d930b967ed3132d Mon Sep 17 00:00:00 2001
+From: Ronan Abhamon <ronan.abhamon@vates.fr>
+Date: Fri, 8 Oct 2021 13:40:35 +0200
+Subject: [PATCH 27/29] rename runX to runx + install it in /usr/bin instead of
+ /usr/sbin
+
+Signed-off-by: Ronan Abhamon <ronan.abhamon@vates.fr>
+---
+ DEPENDENCIES |  2 +-
+ README.md    | 12 ++++++------
+ build.sh     | 18 +++++++++---------
+ runX => runx |  4 ++--
+ 4 files changed, 18 insertions(+), 18 deletions(-)
+ rename runX => runx (98%)
+
+diff --git a/DEPENDENCIES b/DEPENDENCIES
+index fa4d900..3c3c322 100644
+--- a/DEPENDENCIES
++++ b/DEPENDENCIES
+@@ -1,5 +1,5 @@
+ Please make sure you have the following installed on your system, they
+-are required by runX:
++are required by runx:
+ 
+ run time:
+ xen tools (xl) >= 4.9
+diff --git a/README.md b/README.md
+index 2459f5e..6843e36 100644
+--- a/README.md
++++ b/README.md
+@@ -60,20 +60,20 @@ Use the following example config stanza in your
+ /etc/containerd/config.toml config file to choose RunX as OCI-runtime:
+ 
+     [plugins.linux]
+-         runtime="/usr/sbin/runX"
++         runtime="/usr/bin/runx"
+ 
+ - containerd 1.3.x
+ 
+ There does not seem to be a way to configure containerd so that it runs
+-runX instead of runc. You might have to:
++runx instead of runc. You might have to:
+ 
+-    mv /usr/sbin/runX /usr/bin/runc
++    mv /usr/bin/runx /usr/bin/runc
+ 
+ - containerd 1.4.x
+ 
+ Pass "--runc-binary" to ctr run:
+ 
+-    ctr run --runc-binary=/usr/sbin/runX
++    ctr run --runc-binary=/usr/bin/runx
+ 
+ 
+ 
+@@ -83,7 +83,7 @@ Networking Configuration
+ To get bridge based networking working, you need to include the containerd
+ option '--env NETCONF="/path/to/cni/file,name[,IP]"', where:
+     - NETCONF is the environmental varable we use to pass info from containerd
+-      to runX
++      to runx
+     - /path/to/cni/file is the cni v2.0 file used to describe the interface
+     - name is the name of the cni interface
+     - [,IP] is the optional IP if static addresses are used, otherwise DHCP
+@@ -120,7 +120,7 @@ An example cni file is:
+ Container Filesystem Binds
+ --------------------------
+ 
+-Currently runX only supports filesystem binds.  The defaults are bind and RW.
++Currently runx only supports filesystem binds.  The defaults are bind and RW.
+ You can also pass any -o arguement mount uses.  Now you use them in containerd
+ like:
+ 
+diff --git a/build.sh b/build.sh
+index 3780fa0..a1570f3 100755
+--- a/build.sh
++++ b/build.sh
+@@ -83,9 +83,9 @@ else
+     exit 1
+ fi
+ 
+-mkdir -p target/usr/share/runX
++mkdir -p target/usr/share/runx
+ for i in $execs; do
+-    cp files/$i target/usr/share/runX
++    cp files/$i target/usr/share/runx
+ done
+ 
+ mkdir -p target/etc
+@@ -94,19 +94,19 @@ cp config/runx.conf target/etc
+ cd sendfd
+ make
+ cd ..
+-cp sendfd/sendfd target/usr/share/runX/
++cp sendfd/sendfd target/usr/share/runx/
+ 
+-mkdir -p target/usr/sbin
+-cp runX target/usr/sbin
++mkdir -p target/usr/bin
++cp runx target/usr/bin
+ 
+ # Build the kernel and initrd
+-if test \! -f target/usr/share/runX/kernel
++if test \! -f target/usr/share/runx/kernel
+ then
+     kernel/make-kernel "$kernel_path"
+-    cp kernel/out/kernel target/usr/share/runX
++    cp kernel/out/kernel target/usr/share/runx
+ fi
+-if test \! -f target/usr/share/runX/initrd
++if test \! -f target/usr/share/runx/initrd
+ then
+     initrd/make-initrd "$busybox_path"
+-    cp initrd/out/initrd target/usr/share/runX
++    cp initrd/out/initrd target/usr/share/runx
+ fi
 diff --git a/runX b/runx
-similarity index 67%
+similarity index 98%
 rename from runX
 rename to runx
-index 9076934..813a1d5 100755
+index 8431580..813a1d5 100755
 --- a/runX
 +++ b/runx
 @@ -1,7 +1,7 @@
  #!/bin/bash
  
--workpath=/usr/share/runX
+-workpath=/usr/share/runX/
 -rundir=/run/runX
 +workpath=/usr/share/runx/
 +rundir=/run/runx
  
  guestconsole=""
  cmd=""
-@@ -9,6 +9,7 @@ root=""
- bundle=""
- pidfile=""
- containerid=""
-+force=false
- while (( "$#" ))
- do
-     if [[ $1 = "--root" ]]
-@@ -44,6 +45,12 @@ do
-         shift
-         continue
-     fi
-+    if [[ $1 = "--force" ]]
-+    then
-+        force=true
-+        shift
-+        continue
-+    fi
-     if [[ $1 = "--"* ]]
-     then
-         shift
-@@ -103,29 +110,31 @@ fi
+-- 
+2.33.0
+
+
+From b4ecb5628700b461d24c6caa0fa4757f1d7bf6bc Mon Sep 17 00:00:00 2001
+From: Ronan Abhamon <ronan.abhamon@vates.fr>
+Date: Mon, 11 Oct 2021 08:19:38 +0200
+Subject: [PATCH 28/29] set kernel and ramdisk during boot, avoid usage of
+ template data
+
+Signed-off-by: Ronan Abhamon <ronan.abhamon@vates.fr>
+---
+ files/create | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/files/create b/files/create
+index 1e8cf04..1c1db77 100755
+--- a/files/create
++++ b/files/create
+@@ -109,7 +109,9 @@ else
+     pv_args="$pv_args ip=dhcp bridge=$bridge"
+ fi
  
- if test $cmd = "state"
- then
--    $workpath/state $containerid "$crundir"
-+    "$workpath/state" "$workpath" $containerid "$crundir"
- elif test $cmd = "start"
- then
--    $workpath/start $containerid
-+    "$workpath/start" "$workpath" $containerid "$crundir"
- elif test $cmd = "pause"
- then
--    $workpath/pause $containerid pause
-+    "$workpath/pause" "$workpath" $containerid "$crundir" pause
- elif test $cmd = "resume"
- then
--    $workpath/pause $containerid resume
-+    "$workpath/pause" "$workpath" $containerid "$crundir" resume
- elif test $cmd = "kill"
- then
--    $workpath/delete $containerid
--    $workpath/mount $containerid "$crundir" unmount
-+    if [ -f "$crundir/xcp_vm_uuid" ] && [ -f "$crundir/xcp_vdi_uuid" ]; then
-+        "$workpath/delete" `cat "$crundir"/xcp_vm_uuid` `cat "$crundir"/xcp_vdi_uuid`
-+        "$workpath/mount" "$crundir" unmount
-+    fi
- elif test $cmd = "create"
- then
--    $workpath/mount $containerid "$crundir" mount
--    $workpath/create $containerid "$crundir"
-+    "$workpath/mount" "$crundir" mount
-+    "$workpath/create" "$workpath" $containerid "$crundir"
+-xe vm-param-set uuid="$vm_uuid" PV-args="$pv_args"
++xe vm-param-set uuid="$vm_uuid" PV-args="$pv_args root=9p rdinit=/bin/init pvcalls=1"
++xe vm-param-set uuid="$vm_uuid" PV-kernel="/boot/guest/runx/kernel"
++xe vm-param-set uuid="$vm_uuid" PV-ramdisk="/boot/guest/runx/initrd"
  
-     if test "$guestconsole"
-     then
--        daemonize $workpath/serial_start \
--          "$containerid" \
-+        daemonize "$workpath/serial_start" \
-+          `cat "$crundir"/xcp_conf` \
-           "$crundir"/console_pty
-         for n in 10 9 8 7 6 5 4 3 2 1; do
-             if [ ! -L "$crundir"/console_pty ]; then
-@@ -134,14 +143,19 @@ then
-               break
-             fi;
-         done
--        daemonize $workpath/sendfd \
-+        daemonize "$workpath/sendfd" \
-           "$guestconsole" \
-           "$crundir"/console_pty
-     else
-          echo "connect to container console with 'xl console $containerid'"
-     fi
-+    exit 0 # Previous test can set $? to 1...
- elif test $cmd = "delete"
- then
-+    if [ -f "$crundir/xcp_vm_uuid" ] && [ -f "$crundir/xcp_vdi_uuid" ]; then
-+        "$workpath/delete" `cat "$crundir"/xcp_vm_uuid` `cat "$crundir"/xcp_vdi_uuid`
-+        "$workpath/mount" "$crundir" unmount
-+    fi
-     rm -rf "$crundir"
- else
-     :
+ runx_dir="$mountpoint/run/runx"
+ 
+-- 
+2.33.0
+
+
+From 17817da763dcd266837336e2461b96dc67794204 Mon Sep 17 00:00:00 2001
+From: Ronan Abhamon <ronan.abhamon@vates.fr>
+Date: Mon, 11 Oct 2021 09:29:25 +0200
+Subject: [PATCH 29/29] active kernel network patch only if necessary
+
+Signed-off-by: Ronan Abhamon <ronan.abhamon@vates.fr>
+---
+ files/create | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/files/create b/files/create
+index 1c1db77..e23345e 100755
+--- a/files/create
++++ b/files/create
+@@ -109,7 +109,7 @@ else
+     pv_args="$pv_args ip=dhcp bridge=$bridge"
+ fi
+ 
+-xe vm-param-set uuid="$vm_uuid" PV-args="$pv_args root=9p rdinit=/bin/init pvcalls=1"
++xe vm-param-set uuid="$vm_uuid" PV-args="$pv_args root=9p rdinit=/bin/init pvcalls=$pvcalls"
+ xe vm-param-set uuid="$vm_uuid" PV-kernel="/boot/guest/runx/kernel"
+ xe vm-param-set uuid="$vm_uuid" PV-ramdisk="/boot/guest/runx/initrd"
+ 
 -- 
 2.33.0
 
