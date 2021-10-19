@@ -1,7 +1,7 @@
 Summary: runx - Run containers as VMs
 Name:    runx
 Version: 2021.1
-Release: 1.0%{?dist}
+Release: 1.0.0.runx.1%{?dist}
 License: ASL 1.0
 URL:     https://github.com/xcp-ng/runx
 
@@ -89,5 +89,5 @@ ln -s %{_bindir}/runx %{buildroot}/%{_bindir}/docker-runc
 %{_datadir}/runx/state
 
 %changelog
-* Thu Oct 7 2021 Ronan Abhamon <ronan.abhamon@vates.fr> - 2021.1.0-1.0
+* Thu Oct 7 2021 Ronan Abhamon <ronan.abhamon@vates.fr> - 2021.1.0-1.0.0.runx.1
 - Inital runx beta
